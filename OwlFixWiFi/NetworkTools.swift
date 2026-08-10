@@ -10,6 +10,7 @@ public class NetworkTools: ObservableObject {
     @Published public var isRepairing: Bool = false
     @Published public var progressMessage: String = ""
     @Published public var lastOperationSuccess: Bool? = nil
+    @Published public var isDiagnosing: Bool = false
     
     private let maxLogCount = 100
     
@@ -102,6 +103,159 @@ public class NetworkTools: ObservableObject {
         }.value
     }
     
+    // MARK: - Smart Diagnosis & One-Click Fix
+    
+    /// 智能诊断结果
+    public struct DiagnosisResult {
+        public var hasIssues: Bool = false
+        public var clashRunning: Bool = false
+        public var utunCount: Int = 0
+        public var proxyActive: Bool = false
+        public var dnsAbnormal: Bool = false
+        public var recommendedFix: String = ""
+        public var description: String = ""
+    }
+    
+    /// 执行智能诊断（只检测，不修复）
+    public func diagnoseNetwork() async -> DiagnosisResult {
+        var result = DiagnosisResult()
+        
+        await MainActor.run {
+            self.isDiagnosing = true
+            self.progressMessage = "正在智能诊断网络问题..."
+        }
+        
+        addLog("🧠 开始智能网络诊断...", level: .info)
+        
+        // 1. 检查 Clash 进程
+        do {
+            let clashOut = try await executeCommand("ps aux | grep -v grep | grep -i clash || true")
+            if !clashOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result.clashRunning = true
+                addLog("检测到 Clash 进程在运行", level: .warning)
+            }
+        } catch {}
+        
+        // 2. 检查 utun 接口数量
+        do {
+            let utunOut = try await executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'")
+            if let count = Int(utunOut.trimmingCharacters(in: .whitespacesAndNewlines)), count > 0 {
+                result.utunCount = count
+                addLog("发现 \(count) 个 utun 虚拟网卡接口", level: .warning)
+            }
+        } catch {}
+        
+        // 3. 检查代理状态
+        do {
+            let httpProxy = try await executeCommand("networksetup -getwebproxystate Wi-Fi 2>/dev/null | tail -1")
+            let httpsProxy = try await executeCommand("networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null | tail -1")
+            let socksProxy = try await executeCommand("networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null | tail -1")
+            
+            if httpProxy.contains("Enabled") || httpsProxy.contains("Enabled") || socksProxy.contains("Enabled") {
+                result.proxyActive = true
+                addLog("检测到代理配置开启", level: .warning)
+            }
+        } catch {}
+        
+        // 4. 检查 DNS 配置
+        do {
+            let dnsOut = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}'")
+            let dnsList = dnsOut.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            // 如果只有 Fake-IP 网段的 DNS 则异常
+            let fakeIPDNS = dnsList.filter { $0.hasPrefix("198.18.") || $0.hasPrefix("198.19.") }
+            if !fakeIPDNS.isEmpty {
+                result.dnsAbnormal = true
+                addLog("检测到 Clash Fake-IP DNS 配置", level: .warning)
+            }
+        } catch {}
+        
+        // 判断是否有问题
+        result.hasIssues = result.clashRunning || result.utunCount > 0 || result.proxyActive || result.dnsAbnormal
+        
+        // 确定推荐修复方案
+        if result.hasIssues {
+            if result.clashRunning && result.utunCount > 0 {
+                result.recommendedFix = "TUN 专用修复"
+                result.description = "Clash TUN 模式导致虚拟网卡残留，需要彻底清理"
+            } else if result.utunCount > 0 {
+                result.recommendedFix = "深度清理"
+                result.description = "检测到 utun 接口残留，需要管理员权限清理"
+            } else if result.proxyActive || result.dnsAbnormal {
+                result.recommendedFix = "快速修复"
+                result.description = "代理或 DNS 配置异常，需要重置"
+            } else {
+                result.recommendedFix = "深度清理"
+                result.description = "检测到潜在网络问题，建议全面检查"
+            }
+        } else {
+            result.recommendedFix = ""
+            result.description = "网络状态正常"
+        }
+        
+        await MainActor.run {
+            self.isDiagnosing = false
+            if result.hasIssues {
+                self.addLog("✅ 诊断完成：发现问题，推荐【\(result.recommendedFix)】- \(result.description)", level: .info)
+            } else {
+                self.addLog("✅ 诊断完成：网络状态正常", level: .success)
+            }
+        }
+        
+        return result
+    }
+    
+    /// 智能一键修复（自动诊断 + 执行修复）
+    public func smartFix() async {
+        await MainActor.run {
+            self.isRepairing = true
+            self.progressMessage = "正在智能诊断并修复..."
+            self.lastOperationSuccess = nil
+        }
+        
+        addLog("🤖 启动智能一键修复流程...", level: .info)
+        
+        // Step 1: 诊断
+        let diagnosis = await diagnoseNetwork()
+        
+        if !diagnosis.hasIssues {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = true
+                self.addLog("✅ 智能修复完成：网络状态正常，无需操作", level: .success)
+            }
+            return
+        }
+        
+        // Step 2: 根据诊断结果选择修复策略
+        addLog("📋 诊断结果：\(diagnosis.description)", level: .info)
+        addLog("🔧 推荐修复方案：\(diagnosis.recommendedFix)", level: .info)
+        
+        // Step 3: 执行修复
+        switch diagnosis.recommendedFix {
+        case "TUN 专用修复":
+            addLog("💡 检测到 Clash TUN 问题，执行专项清理...", level: .info)
+            await tunFix()
+            
+        case "深度清理":
+            addLog("💡 检测到复杂网络问题，执行深度清理...", level: .info)
+            await fullFix()
+            
+        case "快速修复":
+            addLog("💡 检测到简单代理/DNS 问题，执行快速修复...", level: .info)
+            await quickFix()
+            
+        default:
+            addLog("⚠️ 未明确问题类型，执行全面检查...", level: .warning)
+            await fullFix()
+        }
+        
+        await MainActor.run {
+            self.isRepairing = false
+            self.lastOperationSuccess = true
+            self.addLog("✅ 智能一键修复完成！", level: .success)
+        }
+    }
+    
     // MARK: - Repair Workflows
     
     /// 1. Quick Fix (快速修复)
@@ -119,7 +273,7 @@ public class NetworkTools: ObservableObject {
         do {
             _ = try await executeCommand("networksetup -setwebproxystate Wi-Fi off")
             // 清除代理服务器地址
-            _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+            _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
             addLog("关闭 HTTP 代理状态", level: .success)
             stepCount += 1
         } catch {
@@ -129,7 +283,7 @@ public class NetworkTools: ObservableObject {
         // 2. Secure Web Proxy
         do {
             _ = try await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
-            _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+            _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
             addLog("关闭 HTTPS 代理状态", level: .success)
             stepCount += 1
         } catch {
@@ -139,7 +293,7 @@ public class NetworkTools: ObservableObject {
         // 3. SOCKS Proxy
         do {
             _ = try await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
-            _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+            _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
             addLog("关闭 SOCKS 代理状态", level: .success)
             stepCount += 1
         } catch {
@@ -176,11 +330,11 @@ public class NetworkTools: ObservableObject {
         // First run quick fix steps
         addLog("步骤 1/6: 重置代理与 DNS 设置", level: .info)
         _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
         addLog("代理与 DNS 已重置", level: .success)
         
@@ -266,11 +420,11 @@ public class NetworkTools: ObservableObject {
         // 3. Clear proxy states
         addLog("步骤 3/4: 清除代理配置...", level: .info)
         _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
+        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
         addLog("代理配置已清除", level: .success)
         

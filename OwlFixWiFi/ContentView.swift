@@ -7,6 +7,11 @@ public struct ContentView: View {
     
     public init() {}
     
+    // 获取当前应用版本号
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2.0"
+    }
+    
     public var body: some View {
         ZStack {
             // Native macOS Translucent Sidebar Material (Glassmorphism)
@@ -28,6 +33,10 @@ public struct ContentView: View {
                 // Header Bar
                 HeaderView(monitor: monitor, showAdvisorSheet: $showAdvisorSheet)
                 
+                // �� Smart Fix Banner (智能一键修复)
+                SmartFixBanner(tools: tools)
+                    .padding(.horizontal, 20)
+                
                 // Network Status Card
                 NetworkStatusCard(status: monitor.status)
                     .padding(.horizontal, 20)
@@ -46,7 +55,7 @@ public struct ContentView: View {
             }
             
             // Progress / Status Overlay Banner
-            if tools.isRepairing {
+            if tools.isRepairing || tools.isDiagnosing {
                 VStack {
                     HStack(spacing: 10) {
                         ProgressView()
@@ -68,16 +77,16 @@ public struct ContentView: View {
                 }
                 .padding(.top, 14)
                 .transition(.move(edge: .top).combined(with: .opacity))
-                .animation(.easeInOut(duration: 0.25), value: tools.isRepairing)
+                .animation(.easeInOut(duration: 0.25), value: tools.isRepairing || tools.isDiagnosing)
             }
         }
-        .frame(minWidth: 640, minHeight: 680)
+        .frame(minWidth: 640, minHeight: 720)
         .sheet(isPresented: $showAdvisorSheet) {
             ClashConfigAdvisorView(tools: tools)
         }
         .onAppear {
             monitor.startMonitoring()
-            tools.addLog("OwlFix WiFi v1.1.0 (macOS 浅色毛玻璃材质 UI) 启动完成", level: .info)
+            tools.addLog("OwlFix WiFi v\(appVersion) (macOS 浅色毛玻璃材质 UI) 启动完成", level: .info)
         }
     }
 }

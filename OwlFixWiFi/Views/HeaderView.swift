@@ -9,6 +9,11 @@ public struct HeaderView: View {
         self._showAdvisorSheet = showAdvisorSheet
     }
     
+    // 获取当前应用版本号
+    private var appVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2.0"
+    }
+    
     public var body: some View {
         HStack(alignment: .center) {
             // App Identity & Flat Icon Badge
@@ -36,7 +41,7 @@ public struct HeaderView: View {
                             .font(.system(size: 20, weight: .bold, design: .rounded))
                             .foregroundColor(Color(red: 0.11, green: 0.11, blue: 0.12))
                         
-                        Text("v1.1.0")
+                        Text("v\(appVersion)")
                             .font(.system(size: 11, weight: .semibold, design: .monospaced))
                             .padding(.horizontal, 7)
                             .padding(.vertical, 2)
