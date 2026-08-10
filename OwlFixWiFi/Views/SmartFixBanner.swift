@@ -5,6 +5,7 @@ public struct SmartFixBanner: View {
     @ObservedObject var tools: NetworkTools
     @State private var diagnosisResult: NetworkTools.DiagnosisResult? = nil
     @State private var isSmartFixing = false
+    @State private var wasRepairing = false
     
     public init(tools: NetworkTools) {
         self.tools = tools
@@ -95,6 +96,16 @@ public struct SmartFixBanner: View {
                 .disabled(tools.isRepairing || tools.isDiagnosing)
             }
             .padding(14)
+            .onReceive(tools.$isRepairing) { repairing in
+                // 修复结束（true→false）后等 2 秒重新诊断，刷新横幅状态
+                if wasRepairing && !repairing {
+                    Task {
+                        try? await Task.sleep(nanoseconds: 2_000_000_000)
+                        diagnosisResult = await tools.diagnoseNetwork()
+                    }
+                }
+                wasRepairing = repairing
+            }
             .background(
                 RoundedRectangle(cornerRadius: 12, style: .continuous)
                     .fill(Color.white.opacity(0.9))
