@@ -27,6 +27,23 @@ public final class MenuBarManager: NSObject, ObservableObject {
     
     private override init() { super.init() }
     
+    /// 主窗口强引用（启动时由 AppDelegate 注入），保证随时可恢复
+    public var mainWindow: NSWindow?
+    
+    /// 调试日志
+    private func dlog(_ msg: String) {
+        let line = "\(Date()) \(msg)\n"
+        if let data = line.data(using: .utf8) {
+            if FileManager.default.fileExists(atPath: "/tmp/owl_debug.log") {
+                if let fh = FileHandle(forWritingAtPath: "/tmp/owl_debug.log") {
+                    fh.seekToEndOfFile(); fh.write(data); fh.closeFile()
+                }
+            } else {
+                FileManager.default.createFile(atPath: "/tmp/owl_debug.log", contents: data)
+            }
+        }
+    }
+    
     public func setup() {
         guard statusItem == nil else { return }
         
@@ -80,6 +97,7 @@ public final class MenuBarManager: NSObject, ObservableObject {
     
     @objc(mouseEntered:) public func mouseEntered(with event: NSEvent) {
         let kind = (event.trackingArea?.userInfo?["kind"] as? String) ?? "button"
+        dlog("mouseEntered kind=\(kind)")
         if kind == "button" {
             scheduleShow()
         } else {
@@ -89,13 +107,17 @@ public final class MenuBarManager: NSObject, ObservableObject {
     }
     
     @objc(mouseExited:) public func mouseExited(with event: NSEvent) {
+        dlog("mouseExited kind=\((event.trackingArea?.userInfo?["kind"] as? String) ?? "?") loc=\(NSEvent.mouseLocation)")
         scheduleHide()
     }
     
     private func scheduleShow() {
         hideWork?.cancel()
         showWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.showPopover() }
+        let work = DispatchWorkItem { [weak self] in
+            self?.dlog("scheduleShow fire, mouse=\(NSEvent.mouseLocation)")
+            self?.showPopover()
+        }
         showWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15, execute: work)
     }
@@ -118,6 +140,7 @@ public final class MenuBarManager: NSObject, ObservableObject {
     }
     
     public func showPopover() {
+        dlog("showPopover enter, panel=\(popoverPanel == nil ? "nil" : "exist")")
         if popoverPanel == nil {
             let panel = NSPanel(
                 contentRect: NSRect(x: 0, y: 0, width: 448, height: 600),
@@ -155,15 +178,19 @@ public final class MenuBarManager: NSObject, ObservableObject {
         let height = max(200, fit.height)
         let originX = max(8, buttonWindow.frame.midX - width + 26)
         let originY = buttonWindow.frame.minY - height - 6
+        dlog("showPopover frame=\(originX),\(originY) \(width)x\(height) buttonWin=\(buttonWindow.frame)")
         panel.setFrame(NSRect(x: originX, y: originY, width: width, height: height), display: true)
         panel.orderFrontRegardless()
+        dlog("showPopover done, visible=\(panel.isVisible)")
     }
     
     public func hidePopover() {
+        dlog("hidePopover")
         popoverPanel?.orderOut(nil)
     }
     
     @objc private func buttonClicked() {
+        dlog("buttonClicked")
         showPopover()
     }
     
@@ -236,9 +263,14 @@ public final class MenuBarManager: NSObject, ObservableObject {
     /// 恢复/前置主窗口（窗口只会被隐藏不会被销毁，始终可恢复）
     public func showMainWindow() {
         NSApp.activate(ignoringOtherApps: true)
-        if let window = NSApp.windows.first(where: { $0.canBecomeMain }) {
+        // 优先用启动时捕获的主窗口引用，其次排除悬浮面板后查找
+        let window = mainWindow ?? NSApp.windows.first { !($0 is NSPanel) && $0.canBecomeMain }
+        dlog("showMainWindow found=\(window == nil ? "nil" : String(describing: window)) windows=\(NSApp.windows.count)")
+        if let window = window {
             if window.isMiniaturized { window.deminiaturize(nil) }
             window.makeKeyAndOrderFront(nil)
+            window.orderFrontRegardless()
+            NSApp.activate(ignoringOtherApps: true)
         } else {
             _ = NSApp.sendAction(Selector(("reopen:")), to: NSApp.delegate, from: nil)
         }

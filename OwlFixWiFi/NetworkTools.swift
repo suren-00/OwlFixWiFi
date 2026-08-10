@@ -150,11 +150,11 @@ public class NetworkTools: ObservableObject {
         
         // 3. 检查代理状态
         do {
-            let httpProxy = try await executeCommand("networksetup -getwebproxystate Wi-Fi 2>/dev/null | tail -1")
-            let httpsProxy = try await executeCommand("networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null | tail -1")
-            let socksProxy = try await executeCommand("networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null | tail -1")
+            let httpProxy = try await executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null")
+            let httpsProxy = try await executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null")
+            let socksProxy = try await executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null")
             
-            if httpProxy.contains("Enabled") || httpsProxy.contains("Enabled") || socksProxy.contains("Enabled") {
+            if httpProxy.contains("Enabled: Yes") || httpsProxy.contains("Enabled: Yes") || socksProxy.contains("Enabled: Yes") {
                 result.proxyActive = true
                 addLog("检测到代理配置开启", level: .warning)
             }
@@ -172,27 +172,32 @@ public class NetworkTools: ObservableObject {
             }
         } catch {}
         
-        // 判断是否有问题
-        result.hasIssues = result.clashRunning || result.utunCount > 0 || result.proxyActive || result.dnsAbnormal
+        // 判断是否有问题（Clash 运行时存在 utun 虚拟网卡是 TUN 模式正常现象，不算异常；
+        // 只有 Clash 退出后的 utun 残留、代理残留、Fake-IP DNS 残留、Wi-Fi 无 IP 才算真正异常）
+        let residualUtun = result.utunCount > 0 && !result.clashRunning
+        result.hasIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
         
         // 确定推荐修复方案
         if result.hasIssues {
-            if result.clashRunning && result.utunCount > 0 {
+            if result.wifiNoIP && result.clashRunning {
                 result.recommendedFix = "TUN 专用修复"
-                result.description = "Clash TUN 模式导致虚拟网卡残留，需要彻底清理"
-            } else if result.utunCount > 0 {
+                result.description = "Wi-Fi 未获取到 IP，疑似 Clash TUN 占用，需专项修复"
+            } else if result.wifiNoIP {
+                result.recommendedFix = "Wi-Fi 重置"
+                result.description = "Wi-Fi 未获取到 IP 地址，需要重置网络"
+            } else if residualUtun {
                 result.recommendedFix = "深度清理"
-                result.description = "检测到 utun 接口残留，需要管理员权限清理"
+                result.description = "utun 虚拟网卡残留（Clash 未运行），需要清理"
             } else if result.proxyActive || result.dnsAbnormal {
                 result.recommendedFix = "快速修复"
                 result.description = "代理或 DNS 配置异常，需要重置"
             } else {
-                result.recommendedFix = "深度清理"
+                result.recommendedFix = "快速修复"
                 result.description = "检测到潜在网络问题，建议全面检查"
             }
         } else {
             result.recommendedFix = ""
-            result.description = "网络状态正常"
+            result.description = (result.clashRunning && result.utunCount > 0) ? "Clash TUN 运行正常，网络健康" : "网络状态正常"
         }
         
         await MainActor.run {
@@ -246,6 +251,10 @@ public class NetworkTools: ObservableObject {
         case "快速修复":
             addLog("💡 检测到简单代理/DNS 问题，执行快速修复...", level: .info)
             await quickFix()
+            
+        case "Wi-Fi 重置":
+            addLog("💡 检测到 Wi-Fi 无 IP，执行 Wi-Fi 重置...", level: .info)
+            await wifiReset()
             
         default:
             addLog("⚠️ 未明确问题类型，执行全面检查...", level: .warning)
@@ -391,6 +400,28 @@ public class NetworkTools: ObservableObject {
         }
     }
     
+    /// Wi-Fi 重置：关闭/开启网络服务并重新获取 DHCP（不触碰 Clash）
+    public func wifiReset() async {
+        await MainActor.run {
+            self.isRepairing = true
+            self.progressMessage = "正在重置 Wi-Fi..."
+            self.lastOperationSuccess = nil
+        }
+        
+        addLog("📶 开始重置 Wi-Fi 网络服务...", level: .info)
+        _ = try? await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi off")
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        _ = try? await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi on")
+        try? await Task.sleep(nanoseconds: 2_500_000_000)
+        _ = try? await executeCommand("ipconfig set en0 DHCP 2>/dev/null || true")
+        addLog("✅ Wi-Fi 重置完成，等待获取 IP...", level: .success)
+        
+        await MainActor.run {
+            self.isRepairing = false
+            self.lastOperationSuccess = true
+        }
+    }
+    
     /// 3. Clash TUN Specialized Mode (TUN 专用模式)
     public func tunFix() async {
         await MainActor.run {
@@ -470,9 +501,9 @@ public class NetworkTools: ObservableObject {
         
         // Proxy Check
         do {
-            let http = try await executeCommand("networksetup -getwebproxystate Wi-Fi 2>/dev/null | tail -1")
-            let https = try await executeCommand("networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null | tail -1")
-            let socks = try await executeCommand("networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null | tail -1")
+            let http = try await executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null")
+            let https = try await executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null")
+            let socks = try await executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null")
             addLog("🔗 [代理状态] HTTP: \(http.trimmingCharacters(in: .whitespacesAndNewlines)) | HTTPS: \(https.trimmingCharacters(in: .whitespacesAndNewlines)) | SOCKS: \(socks.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
         } catch {}
         
@@ -588,10 +619,10 @@ public class NetworkTools: ObservableObject {
         }
         
         // 3. 代理状态
-        if let http = try? await executeCommand("networksetup -getwebproxystate Wi-Fi 2>/dev/null | tail -1"),
-           let https = try? await executeCommand("networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null | tail -1"),
-           let socks = try? await executeCommand("networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null | tail -1"),
-           http.contains("Enabled") || https.contains("Enabled") || socks.contains("Enabled") {
+        if let http = try? await executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null"),
+           let https = try? await executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null"),
+           let socks = try? await executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null"),
+           http.contains("Enabled: Yes") || https.contains("Enabled: Yes") || socks.contains("Enabled: Yes") {
             result.proxyActive = true
         }
         
@@ -609,27 +640,28 @@ public class NetworkTools: ObservableObject {
             result.wifiNoIP = true
         }
         
-        result.hasIssues = result.clashRunning || result.utunCount > 0 || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        let residualUtun = result.utunCount > 0 && !result.clashRunning
+        result.hasIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
         
         if result.hasIssues {
-            if result.wifiNoIP {
-                result.recommendedFix = "快速修复"
-                result.description = "Wi-Fi 未获取到 IP 地址"
-            } else if result.clashRunning && result.utunCount > 0 {
+            if result.wifiNoIP && result.clashRunning {
                 result.recommendedFix = "TUN 专用修复"
-                result.description = "Clash TUN 模式导致虚拟网卡残留"
-            } else if result.utunCount > 0 {
+                result.description = "Wi-Fi 未获取到 IP，疑似 Clash TUN 占用"
+            } else if result.wifiNoIP {
+                result.recommendedFix = "Wi-Fi 重置"
+                result.description = "Wi-Fi 未获取到 IP 地址"
+            } else if residualUtun {
                 result.recommendedFix = "深度清理"
                 result.description = "检测到 utun 接口残留"
             } else if result.proxyActive || result.dnsAbnormal {
                 result.recommendedFix = "快速修复"
                 result.description = "代理或 DNS 配置异常"
             } else {
-                result.recommendedFix = "深度清理"
+                result.recommendedFix = "快速修复"
                 result.description = "检测到潜在网络问题"
             }
         } else {
-            result.description = "网络状态正常"
+            result.description = (result.clashRunning && result.utunCount > 0) ? "Clash TUN 运行正常，网络健康" : "网络状态正常"
         }
         return result
     }

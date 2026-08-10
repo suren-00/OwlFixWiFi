@@ -22,6 +22,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         MenuBarManager.shared.setup()
         
         NSApplication.shared.windows.forEach { window in
+            // 记录主窗口引用，菜单栏"打开主界面"随时可恢复
+            if MenuBarManager.shared.mainWindow == nil && !(window is NSPanel) {
+                MenuBarManager.shared.mainWindow = window
+            }
             window.isMovableByWindowBackground = true
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden

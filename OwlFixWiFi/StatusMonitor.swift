@@ -83,13 +83,13 @@ public class StatusMonitor: ObservableObject {
             }
             
             // 5. Proxy states
-            if let httpOut = try? await self.exec("networksetup -getwebproxystate Wi-Fi 2>/dev/null") {
+            if let httpOut = try? await self.exec("networksetup -getwebproxy Wi-Fi 2>/dev/null") {
                 newStatus.httpProxy = httpOut.contains("Enabled: Yes") ? .enabled : .disabled
             }
-            if let httpsOut = try? await self.exec("networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null") {
+            if let httpsOut = try? await self.exec("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null") {
                 newStatus.httpsProxy = httpsOut.contains("Enabled: Yes") ? .enabled : .disabled
             }
-            if let socksOut = try? await self.exec("networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null") {
+            if let socksOut = try? await self.exec("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null") {
                 newStatus.socksProxy = socksOut.contains("Enabled: Yes") ? .enabled : .disabled
             }
             
