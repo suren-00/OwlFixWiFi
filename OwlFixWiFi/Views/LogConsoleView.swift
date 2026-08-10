@@ -82,7 +82,7 @@ public struct LogConsoleView: View {
                                 .foregroundColor(.gray)
                                 .padding(12)
                         } else {
-                            ForEach(tools.logs) { entry in
+                            ForEach(tools.logs.reversed()) { entry in
                                 HStack(alignment: .top, spacing: 6) {
                                     Text("[\(entry.formattedTime)]")
                                         .font(.system(size: 11, weight: .medium, design: .monospaced))
@@ -115,9 +115,10 @@ public struct LogConsoleView: View {
                         )
                 )
                 .onChange(of: tools.logs.count) { _ in
-                    if let lastID = tools.logs.last?.id {
+                    // 最新日志在顶部，自动滚动到顶部
+                    if let latestID = tools.logs.last?.id {
                         withAnimation {
-                            proxy.scrollTo(lastID, anchor: .bottom)
+                            proxy.scrollTo(latestID, anchor: .top)
                         }
                     }
                 }

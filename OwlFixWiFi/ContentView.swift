@@ -9,7 +9,7 @@ public struct ContentView: View {
     
     // 获取当前应用版本号
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.2.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.3.0"
     }
     
     public var body: some View {
@@ -29,29 +29,34 @@ public struct ContentView: View {
             )
             .ignoresSafeArea()
             
-            VStack(spacing: 16) {
-                // Header Bar
+            // 修复滚动问题：Header 固定 + 内容区可滚动
+            VStack(spacing: 0) {
+                // Header Bar (固定顶部)
                 HeaderView(monitor: monitor, showAdvisorSheet: $showAdvisorSheet)
                 
-                // �� Smart Fix Banner (智能一键修复)
-                SmartFixBanner(tools: tools)
+                // 可滚动内容区（解决内容超出无法滚动的问题）
+                ScrollView(.vertical, showsIndicators: true) {
+                    VStack(spacing: 16) {
+                        // 🔥 Smart Fix Banner (智能一键修复)
+                        SmartFixBanner(tools: tools)
+                        
+                        // Network Status Card
+                        NetworkStatusCard(status: monitor.status)
+                        
+                        // 🛡 VPN / IP 纯净度检测
+                        VPNPurityCard(tools: tools)
+                        
+                        // Repair Modes Grid (Quick, Full, TUN, Diagnostic)
+                        RepairModeView(tools: tools, monitor: monitor)
+                        
+                        // Log Console
+                        LogConsoleView(tools: tools)
+                            .frame(height: 240)
+                    }
                     .padding(.horizontal, 20)
-                
-                // Network Status Card
-                NetworkStatusCard(status: monitor.status)
-                    .padding(.horizontal, 20)
-                
-                // Repair Modes Grid (Quick, Full, TUN, Diagnostic)
-                RepairModeView(tools: tools, monitor: monitor)
-                    .padding(.horizontal, 20)
-                
-                Spacer(minLength: 4)
-                
-                // Log Console
-                LogConsoleView(tools: tools)
-                    .frame(height: 180)
-                    .padding(.horizontal, 20)
+                    .padding(.top, 4)
                     .padding(.bottom, 18)
+                }
             }
             
             // Progress / Status Overlay Banner

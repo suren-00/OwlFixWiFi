@@ -11,6 +11,8 @@ public class NetworkTools: ObservableObject {
     @Published public var progressMessage: String = ""
     @Published public var lastOperationSuccess: Bool? = nil
     @Published public var isDiagnosing: Bool = false
+    @Published public var vpnPurity = VPNSecurityInfo()
+    @Published public var isCheckingPurity: Bool = false
     
     private let maxLogCount = 100
     
@@ -565,5 +567,100 @@ public class NetworkTools: ObservableObject {
             missingRules: missing,
             recommendedSnippet: ClashConfigAdvisorView.recommendedYamlSnippet
         )
+    }
+
+    // MARK: - VPN Purity Detection (VPN/IP 纯净度检测)
+    
+    public struct VPNSecurityInfo {
+        public var ip: String = ""
+        public var isp: String = ""
+        public var country: String = ""
+        public var isVPN: Bool = false
+        public var isProxy: Bool = false
+        public var isTor: Bool = false
+        public var isHosting: Bool = false
+        public var isRelay: Bool = false
+        public var purityScore: Int = 100
+        public var checked: Bool = false
+        public var errorMessage: String? = nil
+        
+        public var purityLabel: String {
+            if purityScore >= 90 { return "纯净" }
+            if purityScore >= 70 { return "一般" }
+            return "不纯净"
+        }
+    }
+    
+    private struct IPWhoResponse: Decodable {
+        let ip: String?
+        let success: Bool?
+        let country: String?
+        let connection: ConnectionInfo?
+        let security: SecurityInfo?
+        
+        struct ConnectionInfo: Decodable {
+            let isp: String?
+            let org: String?
+        }
+        struct SecurityInfo: Decodable {
+            let proxy: Bool?
+            let vpn: Bool?
+            let tor: Bool?
+            let relay: Bool?
+            let hosting: Bool?
+        }
+    }
+    
+    /// 检测当前出口 IP 的 VPN 纯净度（通过 ipwho.is 免费 API 查询）
+    public func checkVPNPurity() async {
+        await MainActor.run {
+            self.isCheckingPurity = true
+        }
+        addLog("🛡️ 开始检测出口 IP / VPN 纯净度...", level: .info)
+        
+        do {
+            var request = URLRequest(url: URL(string: "https://ipwho.is/")!)
+            request.timeoutInterval = 15
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let decoded = try JSONDecoder().decode(IPWhoResponse.self, from: data)
+            
+            var info = VPNSecurityInfo()
+            info.checked = true
+            info.ip = decoded.ip ?? "未知"
+            info.country = decoded.country ?? "未知"
+            info.isp = decoded.connection?.isp ?? decoded.connection?.org ?? "未知"
+            info.isVPN = decoded.security?.vpn ?? false
+            info.isProxy = decoded.security?.proxy ?? false
+            info.isTor = decoded.security?.tor ?? false
+            info.isHosting = decoded.security?.hosting ?? false
+            info.isRelay = decoded.security?.relay ?? false
+            
+            var score = 100
+            if info.isVPN { score -= 40 }
+            if info.isProxy { score -= 30 }
+            if info.isTor { score -= 40 }
+            if info.isHosting { score -= 20 }
+            if info.isRelay { score -= 20 }
+            info.purityScore = max(0, score)
+            
+            let finalInfo = info
+            await MainActor.run {
+                self.vpnPurity = finalInfo
+                self.isCheckingPurity = false
+            }
+            
+            addLog("🛡️ 纯净度检测完成: 出口 IP \(finalInfo.ip) (\(finalInfo.country)) | 评分 \(finalInfo.purityScore)/100 [\(finalInfo.purityLabel)]", level: finalInfo.purityScore >= 90 ? .success : .warning)
+            if finalInfo.isVPN { addLog("⚠️ 检测到 VPN 出口标识", level: .warning) }
+            if finalInfo.isProxy { addLog("⚠️ 检测到代理出口标识", level: .warning) }
+            if finalInfo.isTor { addLog("⚠️ 检测到 Tor 出口标识", level: .warning) }
+            if finalInfo.isHosting { addLog("⚠️ 检测到机房/数据中心 IP", level: .warning) }
+        } catch {
+            let err = error.localizedDescription
+            await MainActor.run {
+                self.isCheckingPurity = false
+                self.vpnPurity.errorMessage = err
+            }
+            addLog("❌ 纯净度检测失败: \(err)", level: .error)
+        }
     }
 }

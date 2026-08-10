@@ -19,6 +19,7 @@
 		A10000012C6700010000000A /* LogConsoleView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000A /* LogConsoleView.swift */; };
 		A10000012C6700010000000B /* ClashConfigAdvisorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000B /* ClashConfigAdvisorView.swift */; };
                 A10000012C6700010000000F /* SmartFixBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000F /* SmartFixBanner.swift */; };
+                A10000012C67000100000010 /* VPNPurityCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000010 /* VPNPurityCard.swift */; };
 		A10000012C6700010000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000C /* Assets.xcassets */; };
 		A10000012C6700010000000D /* wifi-fix-tun.sh in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000D /* wifi-fix-tun.sh */; };
 /* End PBXBuildFile section */
@@ -37,6 +38,7 @@
 		A10000012C6700020000000A /* LogConsoleView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogConsoleView.swift; sourceTree = "<group>"; };
 		A10000012C6700020000000B /* ClashConfigAdvisorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClashConfigAdvisorView.swift; sourceTree = "<group>"; };
                 A10000012C6700020000000F /* SmartFixBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartFixBanner.swift; sourceTree = "<group>"; };
+                A10000012C67000200000010 /* VPNPurityCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNPurityCard.swift; sourceTree = "<group>"; };
 		A10000012C6700020000000C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000012C6700020000000D /* wifi-fix-tun.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "wifi-fix-tun.sh"; sourceTree = "<group>"; };
 		A10000012C6700020000000E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -95,6 +97,7 @@
 				A10000012C6700020000000A /* LogConsoleView.swift */,
 				A10000012C6700020000000B /* ClashConfigAdvisorView.swift */,
 				A10000012C6700020000000F /* SmartFixBanner.swift */,
+				A10000012C67000200000010 /* VPNPurityCard.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -197,6 +200,7 @@
 				A10000012C6700010000000A /* LogConsoleView.swift in Sources */,
 				A10000012C6700010000000B /* ClashConfigAdvisorView.swift in Sources */,
 				A10000012C6700010000000F /* SmartFixBanner.swift in Sources */,
+				A10000012C67000100000010 /* VPNPurityCard.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
