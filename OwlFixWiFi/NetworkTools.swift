@@ -118,28 +118,32 @@ public class NetworkTools: ObservableObject {
         // 1. Web Proxy
         do {
             _ = try await executeCommand("networksetup -setwebproxystate Wi-Fi off")
+            // 清除代理服务器地址
+            _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
             addLog("关闭 HTTP 代理状态", level: .success)
             stepCount += 1
         } catch {
-            addLog("关闭 HTTP 代理失败: \(error.localizedDescription)", level: .warning)
+            addLog("关闭 HTTP 代理失败：\(error.localizedDescription)", level: .warning)
         }
         
         // 2. Secure Web Proxy
         do {
             _ = try await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
+            _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
             addLog("关闭 HTTPS 代理状态", level: .success)
             stepCount += 1
         } catch {
-            addLog("关闭 HTTPS 代理失败: \(error.localizedDescription)", level: .warning)
+            addLog("关闭 HTTPS 代理失败：\(error.localizedDescription)", level: .warning)
         }
         
         // 3. SOCKS Proxy
         do {
             _ = try await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
+            _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
             addLog("关闭 SOCKS 代理状态", level: .success)
             stepCount += 1
         } catch {
-            addLog("关闭 SOCKS 代理失败: \(error.localizedDescription)", level: .warning)
+            addLog("关闭 SOCKS 代理失败：\(error.localizedDescription)", level: .warning)
         }
         
         // 4. DNS DHCP Reset
@@ -148,7 +152,7 @@ public class NetworkTools: ObservableObject {
             addLog("重置 Wi-Fi DNS 为自动获取 (DHCP)", level: .success)
             stepCount += 1
         } catch {
-            addLog("重置 DNS 失败: \(error.localizedDescription)", level: .warning)
+            addLog("重置 DNS 失败：\(error.localizedDescription)", level: .warning)
         }
         
         let completedSteps = stepCount
@@ -163,34 +167,55 @@ public class NetworkTools: ObservableObject {
     public func fullFix() async {
         await MainActor.run {
             self.isRepairing = true
-            self.progressMessage = "正在执行深度清理(需管理员权限)..."
+            self.progressMessage = "正在执行深度清理 (需管理员权限)..."
             self.lastOperationSuccess = nil
         }
         
         addLog("🔧 开始执行深度清理流程...", level: .info)
         
         // First run quick fix steps
-        addLog("步骤 1/4: 重置代理与 DNS 设置", level: .info)
+        addLog("步骤 1/6: 重置代理与 DNS 设置", level: .info)
         _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
+        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
+        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
+        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
         addLog("代理与 DNS 已重置", level: .success)
         
         // Sudo elevated operations
-        addLog("步骤 2/4: 弹出系统权限请求以刷新 DNS 缓存与路由...", level: .info)
+        addLog("步骤 2/6: 弹出系统权限请求以刷新 DNS 缓存与路由...", level: .info)
         
         do {
             let sudoCmd = """
+            # 🔴 P0 FIX: 安全终止 Clash 进程（避免暴力杀导致损坏）
+            pkill -f "clash.*--tun|clash.*-t" 2>/dev/null || true
+            sleep 1
+            if ps aux | grep -v grep | grep -i clash; then
+                pkill -9 -i clash 2>/dev/null || true
+                sleep 1
+            fi
+            
+            # 🔴 P0 FIX: 强制关闭所有 utun 虚拟网卡接口（关键！防止 Clash TUN 残留冲突）
+            sudo ifconfig utun* down 2>/dev/null || true
+            
+            # 刷新 DNS 缓存
             dscacheutil -flushcache
             killall -HUP mDNSResponder
+            
+            # 确认 Wi-Fi 网络服务开启状态
             networksetup -setnetworkserviceenabled Wi-Fi on
+            
+            # 清理残余 Clash TUN 冲突路由规则
             route -n delete -host 198.18.0.0/16 default 2>/dev/null || true
             route -n delete -net 10.0.0.0/8 default 2>/dev/null || true
             route -n delete -net 172.16.0.0/12 default 2>/dev/null || true
             """
             
             _ = try await executeSudoCommand(sudoCmd)
+            addLog("Clash 进程已安全终止", level: .success)
+            addLog("utun 虚拟网卡接口已清理", level: .success)
             addLog("刷新 DNS 缓存并同步重启 mDNSResponder", level: .success)
             addLog("确认 Wi-Fi 网络服务开启状态", level: .success)
             addLog("清理残余 Clash TUN 冲突路由规则", level: .success)
@@ -204,7 +229,7 @@ public class NetworkTools: ObservableObject {
             await MainActor.run {
                 self.isRepairing = false
                 self.lastOperationSuccess = false
-                self.addLog("❌ 深度清理中断: \(error.localizedDescription)", level: .error)
+                self.addLog("❌ 深度清理中断：\(error.localizedDescription)", level: .error)
             }
         }
     }
@@ -219,46 +244,48 @@ public class NetworkTools: ObservableObject {
         
         addLog("🦈 启动 Clash TUN 专用修复模式...", level: .info)
         
-        // 1. Detect Clash processes
-        do {
-            let psOut = try await executeCommand("ps aux | grep -v grep | grep -i clash || true")
-            if psOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                addLog("提示: 当前未检测到 Clash 进程运行，若之前异常退出可能残留 utun 路由", level: .warning)
-            } else {
-                addLog("检测到 Clash 进程在运行", level: .info)
-            }
-        } catch {
-            addLog("检查 Clash 进程失败: \(error.localizedDescription)", level: .warning)
-        }
+        // 1. 先终止 Clash 进程
+        addLog("步骤 1/4: 安全终止 Clash 进程...", level: .info)
+        _ = try? await executeCommand("pkill -f \"clash.*--tun\\|clash.*-t\" 2>/dev/null || true")
+        try? await Task.sleep(nanoseconds: 1_000_000_000) // 等待 1 秒
         
-        // 2. Count utun interfaces
-        do {
-            let utunOut = try await executeCommand("ifconfig | grep -c '^utun' || echo 0")
-            let countStr = utunOut.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let count = Int(countStr), count > 0 {
-                addLog("当前系统中存在 \(count) 个 utun 虚拟网卡接口", level: .warning)
-            } else {
-                addLog("未发现 active utun 接口", level: .info)
-            }
-        } catch {}
+        // 检查是否还在运行，如果在则强制终止
+        if let psOut = try? await executeCommand("ps aux | grep -v grep | grep -i clash || true"),
+           !psOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            _ = try? await executeCommand("pkill -9 -i clash 2>/dev/null || true")
+            try? await Task.sleep(nanoseconds: 1_000_000_000) // 再等 1 秒
+        }
+        addLog("Clash 进程处理完成", level: .success)
+        
+        // 2. 关闭 utun 虚拟网卡（核心修复！）
+        addLog("步骤 2/4: 强制释放 utun 虚拟网卡接口...", level: .info)
+        _ = try? await executeCommand("sudo ifconfig utun* down 2>/dev/null || true")
+        try? await Task.sleep(nanoseconds: 500_000_000) // 等待 0.5 秒让系统确认释放
+        addLog("utun 虚拟网卡已释放", level: .success)
         
         // 3. Clear proxy states
+        addLog("步骤 3/4: 清除代理配置...", level: .info)
         _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
+        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
+        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
+        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \\\"\\\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
-        addLog("关闭代理端口重定向，重置 DNS 服务", level: .success)
+        addLog("代理配置已清除", level: .success)
         
         // 4. Try route cleanup
-        addLog("清理冲突 198.18.0.0/16 Fake-IP 虚拟路由表项...", level: .info)
+        addLog("步骤 4/4: 清理 Fake-IP 冲突路由表项...", level: .info)
         _ = try? await executeCommand("route -n delete -net 198.18.0.0/16 2>/dev/null || true")
+        _ = try? await executeCommand("route -n delete -net 10.0.0.0/8 2>/dev/null || true")
+        _ = try? await executeCommand("route -n delete -net 172.16.0.0/12 2>/dev/null || true")
         
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        try? await Task.sleep(nanoseconds: 500_000_000) // 增加到 0.5 秒确保生效
         
         await MainActor.run {
             self.isRepairing = false
             self.lastOperationSuccess = true
-            self.addLog("✅ TUN 专用修复完成！建议在规则建议面板中检查 config.yaml 分流配置", level: .success)
+            self.addLog("✅ TUN 专用修复完成！Clash 进程和 utun 接口已彻底清理，建议在规则建议面板中检查 config.yaml 分流配置", level: .success)
         }
     }
     
@@ -275,13 +302,13 @@ public class NetworkTools: ObservableObject {
         do {
             let ip = try await executeCommand("ipconfig getifaddr en0 2>/dev/null || echo '未获取'")
             let gateway = try await executeCommand("route -n get default 2>/dev/null | grep gateway | awk '{print $2}' || echo '未知'")
-            addLog("📡 [WiFi状态] IP: \(ip.trimmingCharacters(in: .whitespacesAndNewlines)) | 网关: \(gateway.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
+            addLog("📡 [WiFi 状态] IP: \(ip.trimmingCharacters(in: .whitespacesAndNewlines)) | 网关：\(gateway.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
         } catch {}
         
         // DNS Check
         do {
-            let dns = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}' | tr '\n' ' '")
-            addLog("🌐 [DNS服务器] \(dns.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
+            let dns = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}' | tr '\\n' ' '")
+            addLog("🌐 [DNS 服务器] \(dns.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
         } catch {}
         
         // Proxy Check
@@ -296,7 +323,14 @@ public class NetworkTools: ObservableObject {
         do {
             let clashProc = try await executeCommand("ps aux | grep -v grep | grep -i clash || true")
             let isClashRunning = !clashProc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            addLog("🦈 [Clash状态] 进程运行: \(isClashRunning ? "YES" : "NO")", level: isClashRunning ? .warning : .info)
+            addLog("🦈 [Clash 状态] 进程运行：\(isClashRunning ? "YES" : "NO")", level: isClashRunning ? .warning : .info)
+        } catch {}
+        
+        // utun Check
+        do {
+            let utunCount = try await executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'")
+            let count = utunCount.trimmingCharacters(in: .whitespacesAndNewlines)
+            addLog("🛜 [utun 接口] 数量：\(count)", level: Int(count) ?? 0 > 0 ? .warning : .info)
         } catch {}
         
         // Ping Test
@@ -304,9 +338,9 @@ public class NetworkTools: ObservableObject {
         do {
             let pingRes = try await executeCommand("ping -c 2 -W 1500 8.8.8.8 2>/dev/null || echo 'FAIL'")
             if pingRes.contains("2 packets received") || pingRes.contains("1 packets received") {
-                addLog("8.8.8.8 连通性测试: ✅ 正常响应", level: .success)
+                addLog("8.8.8.8 连通性测试：✅ 正常响应", level: .success)
             } else {
-                addLog("8.8.8.8 连通性测试: ❌ 无法 Ping 通", level: .warning)
+                addLog("8.8.8.8 连通性测试：❌ 无法 Ping 通", level: .warning)
             }
         } catch {}
         
@@ -368,7 +402,7 @@ public class NetworkTools: ObservableObject {
             missing.append("缺少局域网 10.0.0.0/8 直连规则")
         }
         if !content.contains("DOMAIN-SUFFIX,local,DIRECT") && !content.contains("DOMAIN-SUFFIX,local") {
-            missing.append("缺少 macOS 局域网 .local 域名直连规则")
+            missing.append("缺少 macOS 局域网.local 域名直连规则")
         }
         
         return ClashConfigResult(

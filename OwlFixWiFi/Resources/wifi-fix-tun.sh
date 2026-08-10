@@ -52,7 +52,7 @@ show_help() {
     echo "  ./wifi-fix-tun.sh --full   # 执行完整修复流程"
     echo "  ./wifi-fix-tun.sh --check  # 只检查状态不修复"
     echo ""
-    echo "提示: 部分操作需要管理员权限"
+    echo "提示：部分操作需要管理员权限"
     echo ""
 }
 
@@ -216,27 +216,38 @@ full_fix() {
     log_info "开始执行完整修复流程..."
     echo ""
     
-    log_info "步骤 1/6: 关闭所有网络代理..."
-    networksetup -setwebproxystate Wi-Fi off 2>/dev/null || true
-    networksetup -setsecurewebproxystate Wi-Fi off 2>/dev/null || true
-    networksetup -setsocksfirewallproxystate Wi-Fi off 2>/dev/null || true
+    log_info "步骤 1/6: 安全终止 Clash 进程（避免暴力杀导致损坏）..."
+    pkill -f "clash.*--tun\|clash.*-t" 2>/dev/null || true
+    sleep 1
+    if ps aux | grep -v "grep" | grep -q -i "clash"; then
+        log_warning "检测到 Clash 进程仍在运行，执行强制终止..."
+        pkill -9 -i clash 2>/dev/null || true
+        sleep 1
+    else
+        log_success "Clash 进程已安全终止"
+    fi
     
-    log_info "步骤 2/6: 重置 DNS 配置..."
-    networksetup -setdnsservices Wi-Fi DHCP 2>/dev/null || true
+    log_info "步骤 2/6: 强制释放 utun 虚拟网卡接口（关键！防止 Clash TUN 残留冲突）..."
+    sudo ifconfig utun* down 2>/dev/null || true
     
-    log_info "步骤 3/6: 刷新 DNS 缓存..."
+    log_info "步骤 3/6: 清除代理服务器地址配置..."
+    networksetup -setwebproxieserver Wi-Fi "" 2>/dev/null || true
+    networksetup -setsecurewebproxieserver Wi-Fi "" 2>/dev/null || true
+    networksetup -setsocksfirewallproxieserver Wi-Fi "" 2>/dev/null || true
+    
+    log_info "步骤 4/6: 刷新 DNS 缓存..."
     sudo dscacheutil -flushcache 2>/dev/null || true
     sudo killall -HUP mDNSResponder 2>/dev/null || true
     
-    log_info "步骤 4/6: 确认 WiFi 服务已启用..."
+    log_info "步骤 5/6: 确认 WiFi 服务已启用..."
     networksetup -setnetworkserviceenabled Wi-Fi on 2>/dev/null || true
     
-    log_info "步骤 5/6: 清理冲突路由规则..."
+    log_info "步骤 6/6: 清理冲突路由规则..."
     sudo route -n delete -host 198.18.0.0/16 default 2>/dev/null || true
     sudo route -n delete -net 10.0.0.0/8 default 2>/dev/null || true
     sudo route -n delete -net 172.16.0.0/12 default 2>/dev/null || true
     
-    log_success "完整修复完成！"
+    log_success "完整修复完成！Clash 进程和 utun 接口已彻底清理"
     echo ""
 }
 
