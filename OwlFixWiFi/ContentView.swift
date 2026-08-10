@@ -1,7 +1,7 @@
 import SwiftUI
 
 public struct ContentView: View {
-    @StateObject private var monitor = StatusMonitor()
+    @ObservedObject private var monitor = StatusMonitor.shared
     @StateObject private var tools = NetworkTools.shared
     @State private var showAdvisorSheet = false
     
@@ -9,7 +9,7 @@ public struct ContentView: View {
     
     // 获取当前应用版本号
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.0"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.4.3"
     }
     
     public var body: some View {

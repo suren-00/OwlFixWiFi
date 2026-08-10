@@ -162,7 +162,7 @@ public class NetworkTools: ObservableObject {
         
         // 4. 检查 DNS 配置
         do {
-            let dnsOut = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}'")
+            let dnsOut = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $3}'")
             let dnsList = dnsOut.components(separatedBy: .newlines).filter { !$0.isEmpty }
             // 如果只有 Fake-IP 网段的 DNS 则异常
             let fakeIPDNS = dnsList.filter { $0.hasPrefix("198.18.") || $0.hasPrefix("198.19.") }
@@ -464,7 +464,7 @@ public class NetworkTools: ObservableObject {
         
         // DNS Check
         do {
-            let dns = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}' | tr '\\n' ' '")
+            let dns = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $3}' | tr '\\n' ' '")
             addLog("🌐 [DNS 服务器] \(dns.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
         } catch {}
         
@@ -596,7 +596,7 @@ public class NetworkTools: ObservableObject {
         }
         
         // 4. Fake-IP DNS
-        if let dns = try? await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}'") {
+        if let dns = try? await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $3}'") {
             let list = dns.components(separatedBy: .newlines).filter { !$0.isEmpty }
             if list.contains(where: { $0.hasPrefix("198.18.") || $0.hasPrefix("198.19.") }) {
                 result.dnsAbnormal = true

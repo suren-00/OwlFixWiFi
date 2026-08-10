@@ -4,6 +4,9 @@ import SwiftUI
 
 /// Background observer polling real-time network states every 5 seconds
 public class StatusMonitor: ObservableObject {
+    /// 共享实例：主界面与菜单栏悬浮面板共用，避免重复轮询
+    public static let shared = StatusMonitor()
+
     @Published public var status = NetworkStatus()
     @Published public var isRefreshing: Bool = false
     @Published public var lastUpdated: Date? = nil
@@ -18,6 +21,7 @@ public class StatusMonitor: ObservableObject {
     
     /// Start 5-second automatic polling timer
     public func startMonitoring(interval: TimeInterval = 5.0) {
+        guard timer == nil else { return }
         refresh()
         timer = Timer.publish(every: interval, on: .main, in: .common)
             .autoconnect()
@@ -64,7 +68,7 @@ public class StatusMonitor: ObservableObject {
             }
             
             // 4. DNS Servers
-            if let dnsOut = try? await self.exec("scutil --dns 2>/dev/null | grep 'nameserver\\[' | head -3 | awk '{print $2}'") {
+            if let dnsOut = try? await self.exec("scutil --dns 2>/dev/null | grep 'nameserver\\[' | head -3 | awk '{print $3}'") {
                 let lines = dnsOut.components(separatedBy: .newlines)
                     .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                     .filter { !$0.isEmpty }
