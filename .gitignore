@@ -1,0 +1,18 @@
+# Xcode & macOS Git Ignore
+*.xcuserstate
+*.workspace
+*.pbxuser
+!.pbxuser
+*.mode2vib
+!.mode2vib
+*.mode1vib
+!.mode1vib
+*.scheme
+!*.scheme
+*.group
+*.xcuserstate/.*
+.DS_Store
+build/
+DerivedData/
+*.dSYM/
+EOF
