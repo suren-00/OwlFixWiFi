@@ -152,7 +152,10 @@ public final class MenuBarManager: NSObject, ObservableObject {
             panel.backgroundColor = .clear
             panel.isOpaque = false
             panel.hasShadow = false
-            panel.hidesOnDeactivate = true
+            // 修复：应用未激活（如用户正在使用其他 App）时，hidesOnDeactivate 会让面板
+            // 一显示就被系统立即隐藏，表现为"悬停不出浮窗"。面板有自己的鼠标离开
+            // 隐藏逻辑（scheduleHide），无需依赖 hidesOnDeactivate。
+            panel.hidesOnDeactivate = false
             panel.collectionBehavior = [.transient, .ignoresCycle]
             panel.isReleasedWhenClosed = false
             

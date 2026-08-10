@@ -105,6 +105,22 @@ public class NetworkTools: ObservableObject {
         }.value
     }
     
+    /// 清理 Fake-IP DNS 残留（macOS 26 起 -setdnsservices 已移除，改用 -setdnsservers Empty；
+    /// 仅当存在 198.18/198.19 残留时才清空，保护用户手动设置的正规 DNS）
+    private func clearFakeIPDNSIfNeeded() async -> Bool {
+        guard let dnsOut = try? await executeCommand("networksetup -getdnsservers Wi-Fi 2>/dev/null") else {
+            return false
+        }
+        let hasFakeIP = dnsOut.contains("198.18.") || dnsOut.contains("198.19.")
+        guard hasFakeIP else { return false }
+        do {
+            _ = try await executeCommand("networksetup -setdnsservers Wi-Fi Empty")
+            return true
+        } catch {
+            return false
+        }
+    }
+    
     // MARK: - Smart Diagnosis & One-Click Fix
     
     /// 智能诊断结果
@@ -312,13 +328,15 @@ public class NetworkTools: ObservableObject {
             addLog("关闭 SOCKS 代理失败：\(error.localizedDescription)", level: .warning)
         }
         
-        // 4. DNS DHCP Reset
+        // 4. DNS 残留清理（macOS 26 起 -setdnsservices 已移除，改用 -setdnsservers Empty；
+        //    仅当存在 Fake-IP(198.18/198.19) 残留时才清空，避免误删用户手动设置的正规 DNS）
         do {
-            _ = try await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
-            addLog("重置 Wi-Fi DNS 为自动获取 (DHCP)", level: .success)
-            stepCount += 1
-        } catch {
-            addLog("重置 DNS 失败：\(error.localizedDescription)", level: .warning)
+            if await clearFakeIPDNSIfNeeded() {
+                addLog("已清除 Fake-IP DNS 残留（198.18.x.x）", level: .success)
+                stepCount += 1
+            } else {
+                addLog("DNS 配置正常（无 Fake-IP 残留），跳过重置", level: .info)
+            }
         }
         
         let completedSteps = stepCount
@@ -347,7 +365,7 @@ public class NetworkTools: ObservableObject {
         _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = try? await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
+        _ = await clearFakeIPDNSIfNeeded()
         addLog("代理与 DNS 已重置", level: .success)
         
         // Sudo elevated operations
@@ -432,43 +450,48 @@ public class NetworkTools: ObservableObject {
         
         addLog("🦈 启动 Clash TUN 专用修复模式...", level: .info)
         
-        // 1. 先终止 Clash 进程
-        addLog("步骤 1/4: 安全终止 Clash 进程...", level: .info)
-        _ = try? await executeCommand("pkill -f \"clash.*--tun\\|clash.*-t\" 2>/dev/null || true")
-        try? await Task.sleep(nanoseconds: 1_000_000_000) // 等待 1 秒
-        
-        // 检查是否还在运行，如果在则强制终止
-        if let psOut = try? await executeCommand("ps aux | grep -v grep | grep -i clash || true"),
-           !psOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            _ = try? await executeCommand("pkill -9 -i clash 2>/dev/null || true")
-            try? await Task.sleep(nanoseconds: 1_000_000_000) // 再等 1 秒
+        // 1. 终止 Clash 核心进程 + 释放 utun + 清理冲突路由（需管理员权限：
+        //    Clash Verge 的 mihomo 以 root 运行，且命令行无 --tun/-t 参数，
+        //    普通权限的 pkill 无法生效，必须走 sudo 弹权限框）
+        addLog("步骤 1/3: 弹出系统权限请求：终止 Clash、释放 utun 并清理路由...", level: .info)
+        let tunSudo = """
+        pkill -9 -f verge-mihomo 2>/dev/null || true
+        sleep 1
+        if ps aux | grep -v grep | grep verge-mihomo >/dev/null 2>&1; then
+            pkill -9 -i clash 2>/dev/null || true
+            sleep 1
+        fi
+        ifconfig utun* down 2>/dev/null || true
+        route -n delete -net 198.18.0.0/16 2>/dev/null || true
+        route -n delete -net 10.0.0.0/8 2>/dev/null || true
+        route -n delete -net 172.16.0.0/12 2>/dev/null || true
+        """
+        do {
+            _ = try await executeSudoCommand(tunSudo)
+            addLog("Clash 进程已终止、utun 已释放、路由已清理", level: .success)
+        } catch {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("❌ TUN 修复中断（管理员权限被拒绝或执行失败）：\(error.localizedDescription)", level: .error)
+            }
+            return
         }
-        addLog("Clash 进程处理完成", level: .success)
         
-        // 2. 关闭 utun 虚拟网卡（核心修复！）
-        addLog("步骤 2/4: 强制释放 utun 虚拟网卡接口...", level: .info)
-        _ = try? await executeCommand("sudo ifconfig utun* down 2>/dev/null || true")
-        try? await Task.sleep(nanoseconds: 500_000_000) // 等待 0.5 秒让系统确认释放
-        addLog("utun 虚拟网卡已释放", level: .success)
-        
-        // 3. Clear proxy states
-        addLog("步骤 3/4: 清除代理配置...", level: .info)
+        // 2. Clear proxy states
+        addLog("步骤 2/3: 清除代理配置...", level: .info)
         _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
         _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
         _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
         _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = try? await executeCommand("networksetup -setdnsservices Wi-Fi DHCP")
+        _ = await clearFakeIPDNSIfNeeded()
         addLog("代理配置已清除", level: .success)
         
-        // 4. Try route cleanup
-        addLog("步骤 4/4: 清理 Fake-IP 冲突路由表项...", level: .info)
-        _ = try? await executeCommand("route -n delete -net 198.18.0.0/16 2>/dev/null || true")
-        _ = try? await executeCommand("route -n delete -net 10.0.0.0/8 2>/dev/null || true")
-        _ = try? await executeCommand("route -n delete -net 172.16.0.0/12 2>/dev/null || true")
-        
-        try? await Task.sleep(nanoseconds: 500_000_000) // 增加到 0.5 秒确保生效
+        // 3. 等待系统确认释放
+        addLog("步骤 3/3: 等待系统确认 utun 释放...", level: .info)
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
         
         await MainActor.run {
             self.isRepairing = false
@@ -726,11 +749,35 @@ public class NetworkTools: ObservableObject {
             info.ip = decoded.ip ?? "未知"
             info.country = decoded.country ?? "未知"
             info.isp = decoded.connection?.isp ?? decoded.connection?.org ?? "未知"
-            info.isVPN = decoded.security?.vpn ?? false
-            info.isProxy = decoded.security?.proxy ?? false
-            info.isTor = decoded.security?.tor ?? false
-            info.isHosting = decoded.security?.hosting ?? false
-            info.isRelay = decoded.security?.relay ?? false
+            
+            // ipwho.is 免费版已不再返回 security 字段（security=null），
+            // 改用 proxycheck.io（免费、无需 key、每日 1000 次）补充安全检测
+            var isVPN = false, isProxy = false, isTor = false, isHosting = false
+            if let ip = decoded.ip,
+               let pcURL = URL(string: "https://proxycheck.io/v2/\(ip)?vpn=1") {
+                var pcRequest = URLRequest(url: pcURL)
+                pcRequest.timeoutInterval = 10
+                if let (pcData, _) = try? await URLSession.shared.data(for: pcRequest),
+                   let pcJSON = try? JSONSerialization.jsonObject(with: pcData) as? [String: Any],
+                   let pcStatus = pcJSON["status"] as? String, pcStatus == "ok",
+                   let ipInfo = pcJSON[ip] as? [String: Any] {
+                    let type = ((ipInfo["type"] as? String) ?? "").uppercased()
+                    let proxyFlag = (ipInfo["proxy"] as? String) ?? "no"
+                    let vpnFlag = (ipInfo["vpn"] as? String) ?? "no"
+                    isVPN = vpnFlag == "yes" || type.contains("VPN")
+                    isProxy = proxyFlag == "yes" && !isVPN
+                    isTor = type.contains("TOR")
+                    isHosting = type.contains("HOSTING")
+                    addLog("🔎 安全标记来源: proxycheck.io (type=\(type), proxy=\(proxyFlag), vpn=\(vpnFlag))", level: .info)
+                } else {
+                    addLog("⚠️ proxycheck.io 安全检测不可用（可能被限流），本次仅展示出口信息", level: .warning)
+                }
+            }
+            info.isVPN = isVPN
+            info.isProxy = isProxy
+            info.isTor = isTor
+            info.isHosting = isHosting
+            info.isRelay = false
             
             var score = 100
             if info.isVPN { score -= 40 }
