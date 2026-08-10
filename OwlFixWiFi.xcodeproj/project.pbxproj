@@ -20,8 +20,10 @@
 		A10000012C6700010000000B /* ClashConfigAdvisorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000B /* ClashConfigAdvisorView.swift */; };
                 A10000012C6700010000000F /* SmartFixBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000F /* SmartFixBanner.swift */; };
                 A10000012C67000100000010 /* VPNPurityCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000010 /* VPNPurityCard.swift */; };
+                A10000012C67000100000011 /* MenuBarManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000011 /* MenuBarManager.swift */; };
 		A10000012C6700010000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000C /* Assets.xcassets */; };
 		A10000012C6700010000000D /* wifi-fix-tun.sh in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000D /* wifi-fix-tun.sh */; };
+                A10000012C67000100000012 /* owl_template.png in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000012 /* owl_template.png */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -29,6 +31,7 @@
 		A10000012C67000200000001 /* OwlFixWiFiApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OwlFixWiFiApp.swift; sourceTree = "<group>"; };
 		A10000012C67000200000002 /* ContentView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentView.swift; sourceTree = "<group>"; };
 		A10000012C67000200000003 /* NetworkTools.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkTools.swift; sourceTree = "<group>"; };
+                A10000012C67000200000011 /* MenuBarManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarManager.swift; sourceTree = "<group>"; };
 		A10000012C67000200000004 /* StatusMonitor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatusMonitor.swift; sourceTree = "<group>"; };
 		A10000012C67000200000005 /* LogEntry.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogEntry.swift; sourceTree = "<group>"; };
 		A10000012C67000200000006 /* NetworkStatus.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkStatus.swift; sourceTree = "<group>"; };
@@ -41,6 +44,7 @@
                 A10000012C67000200000010 /* VPNPurityCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNPurityCard.swift; sourceTree = "<group>"; };
 		A10000012C6700020000000C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000012C6700020000000D /* wifi-fix-tun.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "wifi-fix-tun.sh"; sourceTree = "<group>"; };
+                A10000012C67000200000012 /* owl_template.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = owl_template.png; sourceTree = "<group>"; };
 		A10000012C6700020000000E /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
@@ -69,6 +73,7 @@
 				A10000012C67000200000001 /* OwlFixWiFiApp.swift */,
 				A10000012C67000200000002 /* ContentView.swift */,
 				A10000012C67000200000003 /* NetworkTools.swift */,
+				A10000012C67000200000011 /* MenuBarManager.swift */,
 				A10000012C67000200000004 /* StatusMonitor.swift */,
 				A10000012C67000000000030 /* Models */,
 				A10000012C67000000000040 /* Views */,
@@ -106,6 +111,7 @@
 			isa = PBXGroup;
 			children = (
 				A10000012C6700020000000D /* wifi-fix-tun.sh */,
+				A10000012C67000200000012 /* owl_template.png */,
 			);
 			path = Resources;
 			sourceTree = "<group>";
@@ -178,6 +184,7 @@
 			files = (
 				A10000012C6700010000000C /* Assets.xcassets in Resources */,
 				A10000012C6700010000000D /* wifi-fix-tun.sh in Resources */,
+				A10000012C67000100000012 /* owl_template.png in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -191,6 +198,7 @@
 				A10000012C67000100000001 /* OwlFixWiFiApp.swift in Sources */,
 				A10000012C67000100000002 /* ContentView.swift in Sources */,
 				A10000012C67000100000003 /* NetworkTools.swift in Sources */,
+				A10000012C67000100000011 /* MenuBarManager.swift in Sources */,
 				A10000012C67000100000004 /* StatusMonitor.swift in Sources */,
 				A10000012C67000100000005 /* LogEntry.swift in Sources */,
 				A10000012C67000100000006 /* NetworkStatus.swift in Sources */,

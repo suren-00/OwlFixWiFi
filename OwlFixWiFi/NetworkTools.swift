@@ -114,6 +114,7 @@ public class NetworkTools: ObservableObject {
         public var utunCount: Int = 0
         public var proxyActive: Bool = false
         public var dnsAbnormal: Bool = false
+        public var wifiNoIP: Bool = false
         public var recommendedFix: String = ""
         public var description: String = ""
     }
@@ -569,6 +570,70 @@ public class NetworkTools: ObservableObject {
         )
     }
 
+
+    /// 后台静默健康扫描（供菜单栏 10 分钟定时巡检，不触发 UI 遮罩）
+    public func backgroundHealthCheck() async -> DiagnosisResult {
+        var result = DiagnosisResult()
+        
+        // 1. Clash 进程
+        if let out = try? await executeCommand("ps aux | grep -v grep | grep -i clash || true"),
+           !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result.clashRunning = true
+        }
+        
+        // 2. utun 虚拟网卡
+        if let out = try? await executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'"),
+           let count = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)), count > 0 {
+            result.utunCount = count
+        }
+        
+        // 3. 代理状态
+        if let http = try? await executeCommand("networksetup -getwebproxystate Wi-Fi 2>/dev/null | tail -1"),
+           let https = try? await executeCommand("networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null | tail -1"),
+           let socks = try? await executeCommand("networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null | tail -1"),
+           http.contains("Enabled") || https.contains("Enabled") || socks.contains("Enabled") {
+            result.proxyActive = true
+        }
+        
+        // 4. Fake-IP DNS
+        if let dns = try? await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $2}'") {
+            let list = dns.components(separatedBy: .newlines).filter { !$0.isEmpty }
+            if list.contains(where: { $0.hasPrefix("198.18.") || $0.hasPrefix("198.19.") }) {
+                result.dnsAbnormal = true
+            }
+        }
+        
+        // 5. Wi-Fi 是否获取到 IP
+        if let ip = try? await executeCommand("ipconfig getifaddr en0 2>/dev/null || true"),
+           ip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            result.wifiNoIP = true
+        }
+        
+        result.hasIssues = result.clashRunning || result.utunCount > 0 || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        
+        if result.hasIssues {
+            if result.wifiNoIP {
+                result.recommendedFix = "快速修复"
+                result.description = "Wi-Fi 未获取到 IP 地址"
+            } else if result.clashRunning && result.utunCount > 0 {
+                result.recommendedFix = "TUN 专用修复"
+                result.description = "Clash TUN 模式导致虚拟网卡残留"
+            } else if result.utunCount > 0 {
+                result.recommendedFix = "深度清理"
+                result.description = "检测到 utun 接口残留"
+            } else if result.proxyActive || result.dnsAbnormal {
+                result.recommendedFix = "快速修复"
+                result.description = "代理或 DNS 配置异常"
+            } else {
+                result.recommendedFix = "深度清理"
+                result.description = "检测到潜在网络问题"
+            }
+        } else {
+            result.description = "网络状态正常"
+        }
+        return result
+    }
+    
     // MARK: - VPN Purity Detection (VPN/IP 纯净度检测)
     
     public struct VPNSecurityInfo {

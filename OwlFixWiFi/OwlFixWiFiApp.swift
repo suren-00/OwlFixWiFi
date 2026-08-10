@@ -16,6 +16,9 @@ struct OwlFixWiFiApp: App {
 
 class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // 启动菜单栏常驻图标 + 10 分钟自动扫描
+        MenuBarManager.shared.setup()
+        
         NSApplication.shared.windows.forEach { window in
             window.isMovableByWindowBackground = true
             window.titlebarAppearsTransparent = true
@@ -26,7 +29,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        return true
+        // 关闭窗口后 App 驻留菜单栏继续定时巡检，通过菜单"退出"才真正退出
+        return false
     }
 }
 
