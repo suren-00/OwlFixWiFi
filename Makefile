@@ -3,7 +3,7 @@
 PROJECT_NAME = OwlFixWiFi
 SCHEME = OwlFixWiFi
 BUILD_DIR = build
-DMG_NAME = OwlFixWiFi-v1.0.0.dmg
+DMG_NAME = OwlFixWiFi-v1.1.0.dmg
 
 build:
 	@echo "🛠️ 正在编译 Debug 版本 $(PROJECT_NAME)..."

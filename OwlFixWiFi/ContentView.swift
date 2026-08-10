@@ -9,11 +9,15 @@ public struct ContentView: View {
     
     public var body: some View {
         ZStack {
-            // Main Dark Background
+            // Native macOS Translucent Sidebar Material (Glassmorphism)
+            VisualEffectView(material: .sidebar, blendingMode: .behindWindow, state: .active)
+                .ignoresSafeArea()
+            
+            // Light Frosted White Tint Overlay
             LinearGradient(
                 colors: [
-                    Color(red: 0.08, green: 0.08, blue: 0.10),
-                    Color(red: 0.12, green: 0.12, blue: 0.15)
+                    Color.white.opacity(0.72),
+                    Color(red: 0.94, green: 0.95, blue: 0.97).opacity(0.82)
                 ],
                 startPoint: .topLeading,
                 endPoint: .bottomTrailing
@@ -26,19 +30,19 @@ public struct ContentView: View {
                 
                 // Network Status Card
                 NetworkStatusCard(status: monitor.status)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 20)
                 
                 // Repair Modes Grid (Quick, Full, TUN, Diagnostic)
                 RepairModeView(tools: tools, monitor: monitor)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 20)
                 
                 Spacer(minLength: 4)
                 
                 // Log Console
                 LogConsoleView(tools: tools)
                     .frame(height: 180)
-                    .padding(.horizontal, 18)
-                    .padding(.bottom, 16)
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 18)
             }
             
             // Progress / Status Overlay Banner
@@ -50,15 +54,15 @@ public struct ContentView: View {
                             .scaleEffect(0.9)
                         
                         Text(tools.progressMessage)
-                            .font(.system(size: 13, weight: .semibold))
+                            .font(.system(size: 13, weight: .bold))
                             .foregroundColor(.white)
                     }
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 20)
                     .padding(.vertical, 10)
                     .background(
                         Capsule()
-                            .fill(Color.blue.opacity(0.9))
-                            .shadow(color: Color.black.opacity(0.4), radius: 10, x: 0, y: 4)
+                            .fill(Color.blue)
+                            .shadow(color: Color.black.opacity(0.15), radius: 12, x: 0, y: 4)
                     )
                     Spacer()
                 }
@@ -67,13 +71,13 @@ public struct ContentView: View {
                 .animation(.easeInOut(duration: 0.25), value: tools.isRepairing)
             }
         }
-        .frame(minWidth: 620, minHeight: 660)
+        .frame(minWidth: 640, minHeight: 680)
         .sheet(isPresented: $showAdvisorSheet) {
             ClashConfigAdvisorView(tools: tools)
         }
         .onAppear {
             monitor.startMonitoring()
-            tools.addLog("OwlFix WiFi v1.0 启动完成，正在监控 en0 网络接口与 Clash 进程...", level: .info)
+            tools.addLog("OwlFix WiFi v1.1.0 (macOS 浅色毛玻璃材质 UI) 启动完成", level: .info)
         }
     }
 }

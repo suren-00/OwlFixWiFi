@@ -36,7 +36,7 @@ rules:
                         .foregroundColor(.blue)
                     Text("Clash 配置优化建议")
                         .font(.system(size: 18, weight: .bold))
-                        .foregroundColor(.white)
+                        .foregroundColor(Color(red: 0.11, green: 0.11, blue: 0.12))
                 }
                 
                 Spacer()
@@ -51,7 +51,7 @@ rules:
                 .buttonStyle(.plain)
             }
             
-            Divider().background(Color.white.opacity(0.15))
+            Divider().background(Color.black.opacity(0.08))
             
             // Audit Result Status Card
             if let result = auditResult {
@@ -59,10 +59,10 @@ rules:
                     HStack(spacing: 6) {
                         Text("配置文件:")
                             .font(.system(size: 12, weight: .medium))
-                            .foregroundColor(.white.opacity(0.6))
+                            .foregroundColor(Color(red: 0.5, green: 0.5, blue: 0.52))
                         Text(result.filePath)
-                            .font(.system(size: 12, weight: .semibold, design: .monospaced))
-                            .foregroundColor(.cyan)
+                            .font(.system(size: 12, weight: .bold, design: .monospaced))
+                            .foregroundColor(Color.blue)
                     }
                     
                     if !result.exists {
@@ -70,16 +70,16 @@ rules:
                             Image(systemName: "exclamationmark.triangle.fill")
                                 .foregroundColor(.orange)
                             Text("未检测到本地 config.yaml，如果您使用 Clash Verge / ClashX，请在客户端配置中检查 rules。")
-                                .font(.system(size: 12))
+                                .font(.system(size: 12, weight: .medium))
                                 .foregroundColor(.orange)
                         }
                     } else if result.missingRules.isEmpty {
                         HStack(spacing: 6) {
                             Image(systemName: "checkmark.circle.fill")
-                                .foregroundColor(.green)
+                                .foregroundColor(Color(red: 0.1, green: 0.65, blue: 0.3))
                             Text("已成功配置完整的局域网 DIRECT 直连规则！")
-                                .font(.system(size: 13, weight: .medium))
-                                .foregroundColor(.green)
+                                .font(.system(size: 13, weight: .bold))
+                                .foregroundColor(Color(red: 0.1, green: 0.65, blue: 0.3))
                         }
                     } else {
                         VStack(alignment: .leading, spacing: 6) {
@@ -87,42 +87,46 @@ rules:
                                 Image(systemName: "exclamationmark.triangle.fill")
                                     .foregroundColor(.orange)
                                 Text("检测到可能存在冲突隐患 (\(result.missingRules.count) 项建议):")
-                                    .font(.system(size: 13, weight: .semibold))
+                                    .font(.system(size: 13, weight: .bold))
                                     .foregroundColor(.orange)
                             }
                             
                             ForEach(result.missingRules, id: \.self) { rule in
                                 Text("• \(rule)")
-                                    .font(.system(size: 12))
-                                    .foregroundColor(.white.opacity(0.85))
+                                    .font(.system(size: 12, weight: .medium))
+                                    .foregroundColor(Color(red: 0.2, green: 0.2, blue: 0.22))
                                     .padding(.leading, 12)
                             }
                         }
                     }
                 }
-                .padding(12)
+                .padding(14)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .background(RoundedRectangle(cornerRadius: 10).fill(Color.white.opacity(0.06)))
+                .background(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .fill(Color.white)
+                        .shadow(color: Color.black.opacity(0.04), radius: 6, x: 0, y: 2)
+                )
             }
             
             // Code block & instruction
             VStack(alignment: .leading, spacing: 8) {
                 Text("推荐添加到 config.yaml 的 rules 分组:")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundColor(.white.opacity(0.9))
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(Color(red: 0.11, green: 0.11, blue: 0.12))
                 
                 ScrollView(.vertical) {
                     Text(Self.recommendedYamlSnippet)
-                        .font(.system(size: 11, weight: .regular, design: .monospaced))
-                        .foregroundColor(.green.opacity(0.9))
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(Color(red: 0.0, green: 0.45, blue: 0.85))
                         .padding(12)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 180)
                 .background(
-                    RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.black)
-                        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.white.opacity(0.15), lineWidth: 1))
+                    RoundedRectangle(cornerRadius: 10, style: .continuous)
+                        .fill(Color(red: 0.95, green: 0.97, blue: 1.0))
+                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(Color.blue.opacity(0.2), lineWidth: 1))
                 )
             }
             
@@ -145,18 +149,18 @@ rules:
                         Image(systemName: copiedSnippet ? "checkmark" : "doc.on.doc.fill")
                         Text(copiedSnippet ? "已复制到剪贴板！" : "复制推荐 YAML 规则")
                     }
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.system(size: 13, weight: .bold))
                     .padding(.horizontal, 16)
                     .padding(.vertical, 8)
-                    .background(RoundedRectangle(cornerRadius: 8).fill(Color.blue))
+                    .background(RoundedRectangle(cornerRadius: 8, style: .continuous).fill(Color.blue))
                     .foregroundColor(.white)
                 }
                 .buttonStyle(.plain)
             }
         }
-        .padding(20)
+        .padding(22)
         .frame(width: 540, height: 480)
-        .background(Color(red: 0.1, green: 0.1, blue: 0.12))
+        .background(Color(red: 0.96, green: 0.96, blue: 0.98))
         .onAppear {
             auditResult = tools.auditClashConfig()
         }
