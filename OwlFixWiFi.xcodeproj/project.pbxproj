@@ -21,6 +21,8 @@
                 A10000012C6700010000000F /* SmartFixBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000F /* SmartFixBanner.swift */; };
                 A10000012C67000100000010 /* VPNPurityCard.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000010 /* VPNPurityCard.swift */; };
                 A10000012C67000100000013 /* MenuBarPopoverView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000013 /* MenuBarPopoverView.swift */; };
+                A10000012C67000100000014 /* NetworkCheckView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000014 /* NetworkCheckView.swift */; };
+                A10000012C67000100000015 /* DNSQuickSwitchView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000015 /* DNSQuickSwitchView.swift */; };
                 A10000012C67000100000011 /* MenuBarManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000012C67000200000011 /* MenuBarManager.swift */; };
 		A10000012C6700010000000C /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000C /* Assets.xcassets */; };
 		A10000012C6700010000000D /* wifi-fix-tun.sh in Resources */ = {isa = PBXBuildFile; fileRef = A10000012C6700020000000D /* wifi-fix-tun.sh */; };
@@ -44,6 +46,8 @@
                 A10000012C6700020000000F /* SmartFixBanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SmartFixBanner.swift; sourceTree = "<group>"; };
                 A10000012C67000200000010 /* VPNPurityCard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VPNPurityCard.swift; sourceTree = "<group>"; };
                 A10000012C67000200000013 /* MenuBarPopoverView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarPopoverView.swift; sourceTree = "<group>"; };
+                A10000012C67000200000014 /* NetworkCheckView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NetworkCheckView.swift; sourceTree = "<group>"; };
+                A10000012C67000200000015 /* DNSQuickSwitchView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DNSQuickSwitchView.swift; sourceTree = "<group>"; };
 		A10000012C6700020000000C /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000012C6700020000000D /* wifi-fix-tun.sh */ = {isa = PBXFileReference; lastKnownFileType = text.script.sh; path = "wifi-fix-tun.sh"; sourceTree = "<group>"; };
                 A10000012C67000200000012 /* owl_template.png */ = {isa = PBXFileReference; lastKnownFileType = image.png; path = owl_template.png; sourceTree = "<group>"; };
@@ -106,6 +110,8 @@
 				A10000012C6700020000000F /* SmartFixBanner.swift */,
 				A10000012C67000200000010 /* VPNPurityCard.swift */,
 				A10000012C67000200000013 /* MenuBarPopoverView.swift */,
+				A10000012C67000200000014 /* NetworkCheckView.swift */,
+				A10000012C67000200000015 /* DNSQuickSwitchView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -213,6 +219,8 @@
 				A10000012C6700010000000F /* SmartFixBanner.swift in Sources */,
 				A10000012C67000100000010 /* VPNPurityCard.swift in Sources */,
 				A10000012C67000100000013 /* MenuBarPopoverView.swift in Sources */,
+				A10000012C67000100000014 /* NetworkCheckView.swift in Sources */,
+				A10000012C67000100000015 /* DNSQuickSwitchView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

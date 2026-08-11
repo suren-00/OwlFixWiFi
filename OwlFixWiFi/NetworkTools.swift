@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import SwiftUI
+import UserNotifications
 
 /// Core network tools execution engine for OwlFix WiFi
 public class NetworkTools: ObservableObject {
@@ -13,8 +14,14 @@ public class NetworkTools: ObservableObject {
     @Published public var isDiagnosing: Bool = false
     @Published public var vpnPurity = VPNSecurityInfo()
     @Published public var isCheckingPurity: Bool = false
+    @Published public var publicIPInfo = PublicIPInfo()
+    @Published public var isCheckingPublicIP: Bool = false
+    @Published public var connectivity = ConnectivityResult()
+    @Published public var isCheckingConnectivity: Bool = false
     
     private let maxLogCount = 100
+    private let publicIPKey = "lastKnownPublicIP"
+    private let publicIPHistoryKey = "publicIPChangeHistory"
     
     public init() {
         addLog("OwlFix WiFi 工具就绪", level: .info)
@@ -806,5 +813,260 @@ public class NetworkTools: ObservableObject {
             }
             addLog("❌ 纯净度检测失败: \(err)", level: .error)
         }
+    }
+    
+    // MARK: - 出口 IP 监控（变化时发系统通知）
+    
+    public struct PublicIPInfo {
+        public var ip: String = ""
+        public var country: String = ""
+        public var isp: String = ""
+        public var lastChanged: Date? = nil
+        public var changeCount: Int = 0
+        public var history: [String] = []
+        public var checked: Bool = false
+        
+        public init() {}
+    }
+    
+    private struct IPWhoIPResponse: Decodable {
+        let ip: String?
+        let country: String?
+        let connection: ConnectionInfo?
+        struct ConnectionInfo: Decodable {
+            let isp: String?
+            let org: String?
+        }
+    }
+    
+    /// 检测出口 IP：对比上次记录，变化时写日志 + 系统通知 + 记录历史
+    public func checkPublicIP() async {
+        await MainActor.run { self.isCheckingPublicIP = true }
+        
+        do {
+            var request = URLRequest(url: URL(string: "https://ipwho.is/")!)
+            request.timeoutInterval = 10
+            let (data, _) = try await URLSession.shared.data(for: request)
+            let decoded = try JSONDecoder().decode(IPWhoIPResponse.self, from: data)
+            guard let ip = decoded.ip, !ip.isEmpty else { throw NSError(domain: "NetworkTools", code: 1, userInfo: [NSLocalizedDescriptionKey: "未能获取出口 IP"]) }
+            
+            let country = decoded.country ?? "未知"
+            let isp = decoded.connection?.isp ?? decoded.connection?.org ?? "未知"
+            let defaults = UserDefaults.standard
+            let lastIP = defaults.string(forKey: publicIPKey)
+            var history = defaults.stringArray(forKey: publicIPHistoryKey) ?? []
+            
+            let changed = lastIP != nil && lastIP != ip
+            var info = PublicIPInfo()
+            info.ip = ip
+            info.country = country
+            info.isp = isp
+            info.checked = true
+            info.history = history
+            
+            if changed {
+                let formatter = DateFormatter()
+                formatter.dateFormat = "MM-dd HH:mm"
+                let ts = formatter.string(from: Date())
+                let record = "\(ts) \(lastIP ?? "?") → \(ip) (\(country))"
+                history.insert(record, at: 0)
+                if history.count > 10 { history.removeLast(history.count - 10) }
+                defaults.set(history, forKey: publicIPHistoryKey)
+                info.history = history
+                info.lastChanged = Date()
+                info.changeCount = (defaults.object(forKey: "publicIPChangeCount") as? Int ?? 0) + 1
+                defaults.set(info.changeCount, forKey: "publicIPChangeCount")
+                
+                addLog("🌍 出口 IP 变更：\(lastIP ?? "?") → \(ip)（\(country)）", level: .warning)
+                postIPChangeNotification(old: lastIP ?? "未知", new: ip, country: country)
+            } else {
+                info.changeCount = defaults.object(forKey: "publicIPChangeCount") as? Int ?? 0
+                info.lastChanged = nil
+            }
+            
+            defaults.set(ip, forKey: publicIPKey)
+            
+            let finalInfo = info
+            await MainActor.run {
+                self.publicIPInfo = finalInfo
+                self.isCheckingPublicIP = false
+            }
+            addLog("🌍 出口 IP 检测完成：\(ip)（\(country)）", level: .info)
+        } catch {
+            await MainActor.run { self.isCheckingPublicIP = false }
+            addLog("❌ 出口 IP 检测失败：\(error.localizedDescription)", level: .error)
+        }
+    }
+    
+    private func postIPChangeNotification(old: String, new: String, country: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "🌍 出口 IP 已变更"
+        content.body = "\(old) → \(new)（\(country)）。可能是节点切换或机场掉线。"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+    
+    // MARK: - 连通性分类检测（内网/外网）
+    
+    public enum ConnectivityKind: String {
+        case external = "外网"
+        case `internal` = "内网"
+    }
+    
+    public struct TargetResult: Identifiable {
+        public let id = UUID()
+        public let name: String
+        public let url: String
+        public let kind: ConnectivityKind
+        public var ok: Bool = false
+        public var latencyMs: Int = 0
+        public var httpCode: String = "-"
+        public var checked: Bool = false
+    }
+    
+    public struct ConnectivityResult {
+        public var targets: [TargetResult] = []
+        public var externalOK: Bool = false
+        public var internalOK: Bool = false
+        public var conclusion: String = "尚未检测"
+        public var checked: Bool = false
+        
+        public init() {
+            targets = [
+                TargetResult(name: "Google", url: "https://www.google.com", kind: .external),
+                TargetResult(name: "OpenAI", url: "https://chat.openai.com", kind: .external),
+                TargetResult(name: "GitHub", url: "https://github.com", kind: .external),
+                TargetResult(name: "百度", url: "https://www.baidu.com", kind: .internal),
+                TargetResult(name: "阿里 DNS", url: "https://223.5.5.5", kind: .internal),
+                TargetResult(name: "本地网关", url: "http://192.168.1.1", kind: .internal),
+            ]
+        }
+    }
+    
+    /// 连通性分类检测：外网（Google/OpenAI/GitHub）+ 内网（百度/阿里DNS/网关）
+    public func checkConnectivity() async {
+        await MainActor.run {
+            self.isCheckingConnectivity = true
+            self.connectivity.checked = false
+        }
+        addLog("🧪 开始连通性检测（外网/内网分类）...", level: .info)
+        
+        var result = ConnectivityResult()
+        await withTaskGroup(of: (Int, TargetResult).self) { group in
+            for (idx, target) in result.targets.enumerated() {
+                group.addTask {
+                    var t = target
+                    let cmd = "curl -o /dev/null -s -m 6 -w '%{http_code}|%{time_total}' '\(target.url)'"
+                    if let out = try? await self.executeCommand(cmd) {
+                        let parts = out.components(separatedBy: "|")
+                        let code = parts.first ?? ""
+                        t.httpCode = code.isEmpty ? "超时" : code
+                        // curl 能返回 http_code 即代表 TCP/TLS 连通（000=连接失败/超时）
+                        t.ok = !code.isEmpty && code != "000"
+                        if let sec = Double(parts.count > 1 ? parts[1] : "0") {
+                            t.latencyMs = Int(sec * 1000)
+                        }
+                    } else {
+                        t.httpCode = "失败"
+                    }
+                    t.checked = true
+                    return (idx, t)
+                }
+            }
+            for await (idx, t) in group {
+                result.targets[idx] = t
+            }
+        }
+        
+        result.externalOK = result.targets.filter { $0.kind == .external }.contains { $0.ok }
+        result.internalOK = result.targets.filter { $0.kind == .internal }.contains { $0.ok }
+        result.checked = true
+        
+        if result.externalOK && result.internalOK {
+            result.conclusion = "网络全部正常（内外网均通）"
+        } else if !result.externalOK && result.internalOK {
+            result.conclusion = "外网不通、内网正常 → 大概率是 Clash/代理问题"
+        } else if result.externalOK && !result.internalOK {
+            result.conclusion = "内网不通 → 本地网络或路由器问题"
+        } else {
+            result.conclusion = "内外网均不通 → 网络已断开"
+        }
+        
+        for t in result.targets {
+            let mark = t.ok ? "✅" : "❌"
+            addLog("\(mark) [\(t.kind.rawValue)] \(t.name) \(t.url) HTTP \(t.httpCode) \(t.latencyMs)ms", level: t.ok ? .info : .warning)
+        }
+        addLog("🧪 连通性结论：\(result.conclusion)", level: result.externalOK && result.internalOK ? .success : .warning)
+        
+        await MainActor.run {
+            self.connectivity = result
+            self.isCheckingConnectivity = false
+        }
+    }
+    
+    // MARK: - DNS 一键切换
+    
+    public enum DNSPreset: String, CaseIterable, Identifiable {
+        case auto = "自动 (DHCP)"
+        case dns114 = "114.114.114.114"
+        case ali = "223.5.5.5 (阿里)"
+        case tencent = "119.29.29.29 (腾讯)"
+        case google = "8.8.8.8 (Google)"
+        case cloudflare = "1.1.1.1 (Cloudflare)"
+        
+        public var id: String { rawValue }
+        
+        public var servers: String? {
+            switch self {
+            case .auto: return nil
+            case .dns114: return "114.114.114.114"
+            case .ali: return "223.5.5.5"
+            case .tencent: return "119.29.29.29"
+            case .google: return "8.8.8.8"
+            case .cloudflare: return "1.1.1.1"
+            }
+        }
+        
+        public var detail: String {
+            switch self {
+            case .auto: return "使用路由器下发 DNS"
+            case .dns114: return "国内通用，速度快"
+            case .ali: return "阿里公共 DNS"
+            case .tencent: return "腾讯公共 DNS"
+            case .google: return "海外 DNS（可解析被墙域名）"
+            case .cloudflare: return "Cloudflare 公共 DNS"
+            }
+        }
+    }
+    
+    /// 应用 DNS 预设（macOS 26 兼容：-setdnsservers 后接 IP 或 Empty）
+    public func applyDNS(_ preset: DNSPreset) async {
+        await MainActor.run {
+            self.isRepairing = true
+            self.progressMessage = "正在切换 DNS..."
+        }
+        addLog("🔄 切换 DNS → \(preset.rawValue)...", level: .info)
+        
+        if let servers = preset.servers {
+            do {
+                _ = try await executeCommand("networksetup -setdnsservers Wi-Fi \(servers)")
+                addLog("✅ DNS 已切换为 \(servers)", level: .success)
+            } catch {
+                addLog("❌ DNS 切换失败：\(error.localizedDescription)", level: .error)
+            }
+        } else {
+            do {
+                _ = try await executeCommand("networksetup -setdnsservers Wi-Fi Empty")
+                addLog("✅ DNS 已恢复为自动获取 (DHCP)", level: .success)
+            } catch {
+                addLog("❌ DNS 恢复失败：\(error.localizedDescription)", level: .error)
+            }
+        }
+        
+        await MainActor.run {
+            self.isRepairing = false
+        }
+        StatusMonitor.shared.refresh()
     }
 }

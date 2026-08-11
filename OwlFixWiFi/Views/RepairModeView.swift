@@ -100,8 +100,6 @@ struct RepairButtonCardLight: View {
     let isLoading: Bool
     let action: () -> Void
     
-    @State private var isHovered = false
-    
     var body: some View {
         Button(action: action) {
             VStack(alignment: .leading, spacing: 10) {
@@ -150,19 +148,14 @@ struct RepairButtonCardLight: View {
             .frame(maxWidth: .infinity, minHeight: 98, alignment: .topLeading)
             .background(
                 RoundedRectangle(cornerRadius: 16, style: .continuous)
-                    .fill(Color.white.opacity(isHovered ? 0.95 : 0.78))
-                    .shadow(color: Color.black.opacity(isHovered ? 0.08 : 0.04), radius: isHovered ? 12 : 6, x: 0, y: isHovered ? 4 : 2)
+                    .fill(Color.white.opacity(0.85))
+                    .shadow(color: Color.black.opacity(0.05), radius: 6, x: 0, y: 2)
                     .overlay(
                         RoundedRectangle(cornerRadius: 16, style: .continuous)
-                            .stroke(isHovered ? accentColor.opacity(0.4) : Color.white.opacity(0.9), lineWidth: 1.5)
+                            .stroke(Color.white.opacity(0.9), lineWidth: 1.5)
                     )
             )
-            .scaleEffect(isHovered ? 1.015 : 1.0)
-            .animation(.easeInOut(duration: 0.15), value: isHovered)
         }
         .buttonStyle(.plain)
-        .onHover { hover in
-            isHovered = hover
-        }
     }
 }

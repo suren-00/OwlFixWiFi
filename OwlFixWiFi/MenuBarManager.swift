@@ -47,13 +47,16 @@ public final class MenuBarManager: NSObject, ObservableObject {
     public func setup() {
         guard statusItem == nil else { return }
         
+        dlog("setup begin, NSApp=\(String(describing: NSApp))")
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        dlog("setup statusItem created: \(statusItem == nil ? "nil" : "ok")")
         
         // 加载反白猫头鹰（模板图，系统自动适配深浅色）
         var img: NSImage? = nil
         if let path = Bundle.main.path(forResource: "owl_template", ofType: "png") {
             img = NSImage(contentsOfFile: path)
         }
+        dlog("setup image loaded: \(img == nil ? "nil" : "ok")")
         if let img = img {
             img.size = NSSize(width: 22, height: 22)
             img.isTemplate = true
@@ -61,6 +64,7 @@ public final class MenuBarManager: NSObject, ObservableObject {
             alertImage = tinted(img, with: NSColor.systemOrange)
         }
         
+        dlog("setup button exists: \(statusItem?.button == nil ? "nil" : "ok")")
         updateAppearance()
         requestNotificationPermission()
         installButtonTracking()
@@ -203,7 +207,10 @@ public final class MenuBarManager: NSObject, ObservableObject {
         guard !isScanning else { return }
         isScanning = true
         Task { @MainActor in
+            // 巡检顺带检测出口 IP（变化时自动发系统通知）
+            async let ipCheck: Void = NetworkTools.shared.checkPublicIP()
             let result = await NetworkTools.shared.backgroundHealthCheck()
+            _ = await ipCheck
             self.apply(result: result)
             self.isScanning = false
         }
