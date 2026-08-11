@@ -26,6 +26,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             if MenuBarManager.shared.mainWindow == nil && !(window is NSPanel) {
                 MenuBarManager.shared.mainWindow = window
             }
+            // LSUIElement 纯菜单栏模式：启动时不显示主窗口（通过菜单栏面板"打开主界面"恢复）
+            if !(window is NSPanel) {
+                window.orderOut(nil)
+            }
             window.isMovableByWindowBackground = true
             window.titlebarAppearsTransparent = true
             window.titleVisibility = .hidden
