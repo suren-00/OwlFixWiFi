@@ -112,6 +112,23 @@ public class NetworkTools: ObservableObject {
         }.value
     }
     
+    /// 单目标 HTTP 探测：curl 拿到 http_code 即连通（000=失败/超时）
+    private func probeHTTP(_ url: String, timeout: Int) async -> Bool {
+        let cmd = "curl -o /dev/null -s -m \(timeout) -w '%{http_code}' '\(url)'"
+        if let out = try? await executeCommand(cmd) {
+            let code = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !code.isEmpty && code != "000"
+        }
+        return false
+    }
+    
+    /// 实际连通性快检（诊断/巡检用）：外网 gstatic 204 + 内网百度，并发执行，最坏 ~6 秒
+    public func quickConnectivityCheck() async -> (externalOK: Bool, internalOK: Bool) {
+        async let ext = probeHTTP("https://www.gstatic.com/generate_204", timeout: 6)
+        async let int = probeHTTP("https://www.baidu.com", timeout: 5)
+        return await (ext, int)
+    }
+    
     /// 清理 Fake-IP DNS 残留（macOS 26 起 -setdnsservices 已移除，改用 -setdnsservers Empty；
     /// 仅当存在 198.18/198.19 残留时才清空，保护用户手动设置的正规 DNS）
     private func clearFakeIPDNSIfNeeded() async -> Bool {
@@ -138,6 +155,9 @@ public class NetworkTools: ObservableObject {
         public var proxyActive: Bool = false
         public var dnsAbnormal: Bool = false
         public var wifiNoIP: Bool = false
+        public var externalOK: Bool = false
+        public var internalOK: Bool = false
+        public var connectivityChecked: Bool = false
         public var recommendedFix: String = ""
         public var description: String = ""
     }
@@ -195,13 +215,24 @@ public class NetworkTools: ObservableObject {
             }
         } catch {}
         
+        // 5. 实际连通性快检：配置检查发现不了"有 IP 但外网不通"（认证/路由器/运营商问题），
+        //    用 gstatic 204（外网）+ 百度（内网）实测，总耗时最坏 ~6 秒
+        let (extOK, intOK) = await quickConnectivityCheck()
+        result.externalOK = extOK
+        result.internalOK = intOK
+        result.connectivityChecked = true
+        addLog("🧪 连通性快检：外网\(extOK ? "✅通" : "❌不通") 内网\(intOK ? "✅通" : "❌不通")", level: extOK ? .info : .warning)
+        
         // 判断是否有问题（Clash 运行时存在 utun 虚拟网卡是 TUN 模式正常现象，不算异常；
-        // 只有 Clash 退出后的 utun 残留、代理残留、Fake-IP DNS 残留、Wi-Fi 无 IP 才算真正异常）
+        // 只有 Clash 退出后的 utun 残留、代理残留、Fake-IP DNS 残留、Wi-Fi 无 IP 才算真正异常；
+        // 配置全部正常但外网不通 = 网络侧问题（认证/路由器/运营商），修复工具无法解决）
         let residualUtun = result.utunCount > 0 && !result.clashRunning
-        result.hasIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        let configIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        let networkSideIssue = !extOK && !configIssues
+        result.hasIssues = configIssues || networkSideIssue
         
         // 确定推荐修复方案
-        if result.hasIssues {
+        if configIssues {
             if result.wifiNoIP && result.clashRunning {
                 result.recommendedFix = "TUN 专用修复"
                 result.description = "Wi-Fi 未获取到 IP，疑似 Clash TUN 占用，需专项修复"
@@ -218,6 +249,11 @@ public class NetworkTools: ObservableObject {
                 result.recommendedFix = "快速修复"
                 result.description = "检测到潜在网络问题，建议全面检查"
             }
+        } else if networkSideIssue {
+            result.recommendedFix = "网络侧检查"
+            result.description = intOK
+                ? "网络配置正常但外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商），修复工具无法解决"
+                : "网络配置正常但内外网均不通，疑似网络已断开或网络侧故障"
         } else {
             result.recommendedFix = ""
             result.description = (result.clashRunning && result.utunCount > 0) ? "Clash TUN 运行正常，网络健康" : "网络状态正常"
@@ -278,6 +314,9 @@ public class NetworkTools: ObservableObject {
         case "Wi-Fi 重置":
             addLog("💡 检测到 Wi-Fi 无 IP，执行 Wi-Fi 重置...", level: .info)
             await wifiReset()
+            
+        case "网络侧检查":
+            addLog("⚠️ 网络配置正常但外网不通，属于网络侧问题（公共 WiFi 认证 / 路由器 / 运营商），修复工具无法解决。建议：1) 公共 WiFi 打开浏览器完成认证 2) 检查路由器/光猫是否正常 3) 联系运营商", level: .warning)
             
         default:
             addLog("⚠️ 未明确问题类型，执行全面检查...", level: .warning)
@@ -670,10 +709,18 @@ public class NetworkTools: ObservableObject {
             result.wifiNoIP = true
         }
         
-        let residualUtun = result.utunCount > 0 && !result.clashRunning
-        result.hasIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        // 6. 实际连通性快检（巡检同样检测，避免"配置正常但外网不通"漏报）
+        let (extOK, intOK) = await quickConnectivityCheck()
+        result.externalOK = extOK
+        result.internalOK = intOK
+        result.connectivityChecked = true
         
-        if result.hasIssues {
+        let residualUtun = result.utunCount > 0 && !result.clashRunning
+        let configIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        let networkSideIssue = !extOK && !configIssues
+        result.hasIssues = configIssues || networkSideIssue
+        
+        if configIssues {
             if result.wifiNoIP && result.clashRunning {
                 result.recommendedFix = "TUN 专用修复"
                 result.description = "Wi-Fi 未获取到 IP，疑似 Clash TUN 占用"
@@ -690,6 +737,11 @@ public class NetworkTools: ObservableObject {
                 result.recommendedFix = "快速修复"
                 result.description = "检测到潜在网络问题"
             }
+        } else if networkSideIssue {
+            result.recommendedFix = "网络侧检查"
+            result.description = intOK
+                ? "网络配置正常但外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商）"
+                : "网络配置正常但内外网均不通，疑似网络已断开或网络侧故障"
         } else {
             result.description = (result.clashRunning && result.utunCount > 0) ? "Clash TUN 运行正常，网络健康" : "网络状态正常"
         }
@@ -840,7 +892,9 @@ public class NetworkTools: ObservableObject {
     }
     
     /// 检测出口 IP：对比上次记录，变化时写日志 + 系统通知 + 记录历史
-    public func checkPublicIP() async {
+    /// 检测出口 IP：变化时写日志 + 系统通知 + 记录历史；返回是否检测成功（失败=外网疑似不可达）
+    @discardableResult
+    public func checkPublicIP() async -> Bool {
         await MainActor.run { self.isCheckingPublicIP = true }
         
         do {
@@ -892,9 +946,11 @@ public class NetworkTools: ObservableObject {
                 self.isCheckingPublicIP = false
             }
             addLog("🌍 出口 IP 检测完成：\(ip)（\(country)）", level: .info)
+            return true
         } catch {
             await MainActor.run { self.isCheckingPublicIP = false }
             addLog("❌ 出口 IP 检测失败：\(error.localizedDescription)", level: .error)
+            return false
         }
     }
     

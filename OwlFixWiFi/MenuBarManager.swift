@@ -208,10 +208,18 @@ public final class MenuBarManager: NSObject, ObservableObject {
         isScanning = true
         Task { @MainActor in
             // 巡检顺带检测出口 IP（变化时自动发系统通知）
-            async let ipCheck: Void = NetworkTools.shared.checkPublicIP()
+            async let ipCheck: Bool = NetworkTools.shared.checkPublicIP()
             let result = await NetworkTools.shared.backgroundHealthCheck()
-            _ = await ipCheck
-            self.apply(result: result)
+            let ipOK = await ipCheck
+            var final = result
+            // 出口 IP 检测失败 + 连通性快检也确认外网不通 → 标记网络侧异常（避免 ipwho.is 偶发故障误报）
+            if !ipOK && !result.externalOK && !final.hasIssues {
+                final.hasIssues = true
+                final.recommendedFix = "网络侧检查"
+                final.description = "出口检测失败且外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商）"
+                NetworkTools.shared.addLog("⚠️ 出口 IP 检测失败且外网不通，疑似网络侧问题", level: .warning)
+            }
+            self.apply(result: final)
             self.isScanning = false
         }
     }
