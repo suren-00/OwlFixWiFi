@@ -3,7 +3,7 @@ import SwiftUI
 import UserNotifications
 
 /// 菜单栏常驻管理器：反白猫头鹰图标 + 悬停弹出面板 + 每 10 分钟自动扫描 + 异常提示
-public final class MenuBarManager: NSObject, ObservableObject {
+public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     public static let shared = MenuBarManager()
     
     /// 最新检测结果（自动扫描/手动检测共用），悬停面板顶部展示
@@ -19,6 +19,10 @@ public final class MenuBarManager: NSObject, ObservableObject {
     
     /// 自动扫描间隔：10 分钟
     private let scanInterval: TimeInterval = 600
+    
+    /// 自动快速修复节流：同一类问题 30 分钟内最多自动修 1 次
+    private let autoFixInterval: TimeInterval = 1800
+    private let lastAutoFixKey = "lastAutoQuickFixTime"
     
     // 悬停弹出面板
     private var popoverPanel: NSPanel?
@@ -219,9 +223,45 @@ public final class MenuBarManager: NSObject, ObservableObject {
                 final.description = "出口检测失败且外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商）"
                 NetworkTools.shared.addLog("⚠️ 出口 IP 检测失败且外网不通，疑似网络侧问题", level: .warning)
             }
+            
+            // 自动快速修复：仅"快速修复"类问题（代理/DNS 残留）自动执行；
+            // TUN 修复/深度清理（杀 Clash + sudo）、Wi-Fi 重置（闪断）、网络侧问题（修了无效）保持手动
+            if final.hasIssues && final.recommendedFix == "快速修复" {
+                if NetworkTools.shared.isRepairing {
+                    NetworkTools.shared.addLog("ℹ️ 检测到代理/DNS 残留，但用户正在执行修复，跳过自动修复", level: .info)
+                } else if canAutoFix() {
+                    dlog("autoFix: 自动执行快速修复")
+                    NetworkTools.shared.addLog("🤖 巡检发现代理/DNS 残留，自动执行快速修复...", level: .warning)
+                    await NetworkTools.shared.quickFix()
+                    markAutoFix()
+                    // 修复后复检，更新面板状态
+                    let recheck = await NetworkTools.shared.backgroundHealthCheck()
+                    if recheck.hasIssues {
+                        NetworkTools.shared.addLog("⚠️ 自动快速修复后仍存在异常：\(recheck.description)", level: .warning)
+                    } else {
+                        NetworkTools.shared.addLog("✅ 自动快速修复成功，复检网络正常", level: .success)
+                    }
+                    self.apply(result: recheck)
+                    self.isScanning = false
+                    return
+                } else {
+                    NetworkTools.shared.addLog("ℹ️ 检测到代理/DNS 残留，30 分钟内已自动修复过，本次跳过（可手动一键修复）", level: .info)
+                }
+            }
+            
             self.apply(result: final)
             self.isScanning = false
         }
+    }
+    
+    /// 自动修复节流判断
+    private func canAutoFix() -> Bool {
+        guard let last = UserDefaults.standard.object(forKey: lastAutoFixKey) as? Date else { return true }
+        return Date().timeIntervalSince(last) >= autoFixInterval
+    }
+    
+    private func markAutoFix() {
+        UserDefaults.standard.set(Date(), forKey: lastAutoFixKey)
     }
     
     private func apply(result: NetworkTools.DiagnosisResult) {
@@ -297,15 +337,28 @@ public final class MenuBarManager: NSObject, ObservableObject {
     // MARK: - 通知
     
     private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().delegate = self
         UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { _, _ in }
     }
     
     private func postNotification(description: String, fix: String) {
         let content = UNMutableNotificationContent()
         content.title = "OwlFix WiFi 检测到网络异常"
-        content.body = "\(description)（推荐：\(fix)）。点击菜单栏猫头鹰图标可一键修复。"
+        content.body = "\(description)（推荐：\(fix)）。点击此通知打开主界面一键修复。"
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
+    }
+    
+    // MARK: - 通知点击回调：用户点击通知 → 打开主界面，选择手动修复
+    
+    public func userNotificationCenter(_ center: UNUserNotificationCenter,
+                                       didReceive response: UNNotificationResponse,
+                                       withCompletionHandler completionHandler: @escaping () -> Void) {
+        DispatchQueue.main.async {
+            self.dlog("notification clicked -> showMainWindow")
+            self.showMainWindow()
+        }
+        completionHandler()
     }
 }
