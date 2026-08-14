@@ -96,6 +96,32 @@ public struct SmartFixBanner: View {
                 .disabled(tools.isRepairing || tools.isDiagnosing)
             }
             .padding(14)
+            
+            Divider().background(Color.black.opacity(0.06))
+            
+            // 底部自动修复开关栏
+            HStack(spacing: 8) {
+                Image(systemName: MenuBarManager.shared.autoRepairEnabled ? "bolt.badge.automatic.fill" : "bolt.slash.fill")
+                    .font(.system(size: 12, weight: .bold))
+                    .foregroundColor(MenuBarManager.shared.autoRepairEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3) : Color.gray)
+                
+                Text("异常自动自愈修复：\(MenuBarManager.shared.autoRepairEnabled ? "已开启（巡检发现异常先自动修复）" : "已关闭（仅提示通知）")")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(Color.secondary)
+                
+                Spacer()
+                
+                Toggle("", isOn: Binding(
+                    get: { MenuBarManager.shared.autoRepairEnabled },
+                    set: { MenuBarManager.shared.autoRepairEnabled = $0 }
+                ))
+                .toggleStyle(SwitchToggleStyle(tint: Color(red: 0.1, green: 0.65, blue: 0.3)))
+                .labelsHidden()
+                .scaleEffect(0.7)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
+            .background(Color.black.opacity(0.02))
             .onReceive(tools.$isRepairing) { repairing in
                 // 修复结束（true→false）后等 2 秒重新诊断，刷新横幅状态
                 if wasRepairing && !repairing {
@@ -112,5 +138,10 @@ public struct SmartFixBanner: View {
                     .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 2)
             )
         }
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Color.white.opacity(0.9))
+                .shadow(color: Color.black.opacity(0.08), radius: 8, x: 0, y: 2)
+        )
     }
 }

@@ -10,9 +10,38 @@ public struct MenuBarPopoverView: View {
     public init() {}
     
     public var body: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 10) {
             // 顶部：自动检测结果 + 一键修复 / 一键检测
             topBar
+            
+            // 自动自愈修复开关条
+            HStack(spacing: 8) {
+                Image(systemName: manager.autoRepairEnabled ? "bolt.badge.automatic.fill" : "bolt.slash.fill")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundColor(manager.autoRepairEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3) : Color.gray)
+                
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("自动自愈修复")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(Color(red: 0.11, green: 0.11, blue: 0.12))
+                    Text(manager.autoRepairEnabled ? "检测到代理/DNS/IP异常时先自动修复" : "已关闭，仅在异常时发通知提醒")
+                        .font(.system(size: 9.5, weight: .medium))
+                        .foregroundColor(Color.gray)
+                }
+                
+                Spacer()
+                
+                Toggle("", isOn: $manager.autoRepairEnabled)
+                    .toggleStyle(SwitchToggleStyle(tint: Color(red: 0.1, green: 0.65, blue: 0.3)))
+                    .labelsHidden()
+                    .scaleEffect(0.72)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
+            .background(
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(manager.autoRepairEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3).opacity(0.08) : Color.gray.opacity(0.08))
+            )
             
             // 网络状态概览（紧凑 2x2 网格，适配窄面板）
             compactStatusGrid

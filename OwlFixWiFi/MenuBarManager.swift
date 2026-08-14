@@ -20,16 +20,32 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
     /// 自动扫描间隔：10 分钟
     private let scanInterval: TimeInterval = 600
     
-    /// 自动快速修复节流：同一类问题 30 分钟内最多自动修 1 次
+    /// 自动修复节流：同一类问题 30 分钟内最多自动修 1 次
     private let autoFixInterval: TimeInterval = 1800
     private let lastAutoFixKey = "lastAutoQuickFixTime"
+    private let autoRepairKey = "enableAutoRepair"
+    
+    /// 自动自愈修复总开关（默认开启，持久化到 UserDefaults）
+    @Published public var autoRepairEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(autoRepairEnabled, forKey: autoRepairKey)
+            dlog("autoRepairEnabled changed to \(autoRepairEnabled)")
+        }
+    }
     
     // 悬停弹出面板
     private var popoverPanel: NSPanel?
     private var showWork: DispatchWorkItem?
     private var hideWork: DispatchWorkItem?
     
-    private override init() { super.init() }
+    private override init() {
+        if UserDefaults.standard.object(forKey: "enableAutoRepair") == nil {
+            self.autoRepairEnabled = true
+        } else {
+            self.autoRepairEnabled = UserDefaults.standard.bool(forKey: "enableAutoRepair")
+        }
+        super.init()
+    }
     
     /// 主窗口强引用（启动时由 AppDelegate 注入），保证随时可恢复
     public var mainWindow: NSWindow?
@@ -224,28 +240,45 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
                 NetworkTools.shared.addLog("⚠️ 出口 IP 检测失败且外网不通，疑似网络侧问题", level: .warning)
             }
             
-            // 自动快速修复：仅"快速修复"类问题（代理/DNS 残留）自动执行；
-            // TUN 修复/深度清理（杀 Clash + sudo）、Wi-Fi 重置（闪断）、网络侧问题（修了无效）保持手动
-            if final.hasIssues && final.recommendedFix == "快速修复" {
+            // 自动自愈修复：开启时遇到异常先自动执行自愈修复
+            if final.hasIssues && self.autoRepairEnabled {
                 if NetworkTools.shared.isRepairing {
-                    NetworkTools.shared.addLog("ℹ️ 检测到代理/DNS 残留，但用户正在执行修复，跳过自动修复", level: .info)
+                    NetworkTools.shared.addLog("ℹ️ 检测到网络异常，但当前正在手动修复中，跳过自动修复", level: .info)
                 } else if canAutoFix() {
-                    dlog("autoFix: 自动执行快速修复")
-                    NetworkTools.shared.addLog("🤖 巡检发现代理/DNS 残留，自动执行快速修复...", level: .warning)
-                    await NetworkTools.shared.quickFix()
-                    markAutoFix()
-                    // 修复后复检，更新面板状态
-                    let recheck = await NetworkTools.shared.backgroundHealthCheck()
-                    if recheck.hasIssues {
-                        NetworkTools.shared.addLog("⚠️ 自动快速修复后仍存在异常：\(recheck.description)", level: .warning)
-                    } else {
-                        NetworkTools.shared.addLog("✅ 自动快速修复成功，复检网络正常", level: .success)
+                    var repaired = false
+                    if final.recommendedFix == "快速修复" {
+                        dlog("autoFix: 自动执行快速修复")
+                        NetworkTools.shared.addLog("🤖 [自动修复] 巡检发现代理/DNS 异常，正在自动自愈...", level: .warning)
+                        await NetworkTools.shared.quickFix()
+                        repaired = true
+                    } else if final.recommendedFix == "Wi-Fi 重置" {
+                        dlog("autoFix: 自动执行 Wi-Fi 重置")
+                        NetworkTools.shared.addLog("🤖 [自动修复] 巡检发现 Wi-Fi 拿不到 IP，正在自动重置 Wi-Fi 并重新请求 DHCP...", level: .warning)
+                        await NetworkTools.shared.wifiReset()
+                        repaired = true
+                    } else if final.recommendedFix == "TUN 专用修复" {
+                        dlog("autoFix: 尝试安全快速自愈")
+                        NetworkTools.shared.addLog("🤖 [自动修复] 检测到 TUN/代理异常，正在自动重置代理与清理 Fake-IP DNS...", level: .warning)
+                        await NetworkTools.shared.quickFix()
+                        repaired = true
                     }
-                    self.apply(result: recheck)
-                    self.isScanning = false
-                    return
+                    
+                    if repaired {
+                        markAutoFix()
+                        try? await Task.sleep(nanoseconds: 1_500_000_000)
+                        let recheck = await NetworkTools.shared.backgroundHealthCheck()
+                        if recheck.hasIssues {
+                            NetworkTools.shared.addLog("⚠️ [自动修复] 自动自愈后仍存在异常：\(recheck.description)，建议点击主界面手动修复", level: .warning)
+                        } else {
+                            NetworkTools.shared.addLog("✅ [自动修复] 自动自愈成功！复检网络已完全恢复正常", level: .success)
+                            self.postAutoFixSuccessNotification(detail: final.description)
+                        }
+                        self.apply(result: recheck)
+                        self.isScanning = false
+                        return
+                    }
                 } else {
-                    NetworkTools.shared.addLog("ℹ️ 检测到代理/DNS 残留，30 分钟内已自动修复过，本次跳过（可手动一键修复）", level: .info)
+                    NetworkTools.shared.addLog("ℹ️ 检测到异常，30 分钟内已自动自愈过，本次跳过（可手动一键修复）", level: .info)
                 }
             }
             
@@ -345,6 +378,15 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
         let content = UNMutableNotificationContent()
         content.title = "OwlFix WiFi 检测到网络异常"
         content.body = "\(description)（推荐：\(fix)）。点击此通知打开主界面一键修复。"
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request)
+    }
+    
+    private func postAutoFixSuccessNotification(detail: String) {
+        let content = UNMutableNotificationContent()
+        content.title = "OwlFix WiFi 已自动自愈修复网络"
+        content.body = "已自动处理：\(detail)，网络现已恢复正常。"
         content.sound = .default
         let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
         UNUserNotificationCenter.current().add(request)
