@@ -140,8 +140,9 @@ public class StatusMonitor: ObservableObject {
             let pipe = Pipe()
             process.standardOutput = pipe
             try process.run()
-            process.waitUntilExit()
+            // 先读取并排空输出，再等待退出，避免大输出填满 Pipe 后永久死锁。
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             if process.terminationStatus != 0 {
                 throw NSError(

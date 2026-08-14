@@ -67,9 +67,10 @@ public class NetworkTools: ObservableObject {
             process.standardError = pipe
             
             try process.run()
-            process.waitUntilExit()
-            
+            // 必须在子进程运行时持续排空 Pipe。若先 waitUntilExit，再读取超过管道容量的输出
+            // （例如 Mihomo /proxies），子进程会阻塞在 write，父进程则永久等退出。
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             let output = String(data: data, encoding: .utf8) ?? ""
             
             if process.terminationStatus != 0 {
@@ -291,18 +292,26 @@ public class NetworkTools: ObservableObject {
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func clashProxySnapshot() async -> ClashProxySnapshot? {
-        guard let output = try? await executeCommand("test -S /tmp/verge/verge-mihomo.sock && /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 3 http://localhost/proxies"),
+    private func clashProxyInfo(named name: String) async -> [String: Any]? {
+        let encodedName = percentEncodedPathComponent(name)
+        guard let output = try? await executeCommand("test -S /tmp/verge/verge-mihomo.sock && /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 3 'http://localhost/proxies/\(encodedName)'"),
               let data = output.data(using: .utf8),
-              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let proxies = root["proxies"] as? [String: Any] else {
-            return nil
-        }
+              let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        return info
+    }
 
+    private func clashProxySnapshot() async -> ClashProxySnapshot? {
         let preferredNames = ["🤖 Codex专用", "Codex专用", "OpenAI", "AI云加速"]
-        let groupName = preferredNames.first(where: { proxies[$0] != nil })
-            ?? proxies.keys.sorted().first(where: { $0.localizedCaseInsensitiveContains("codex") || $0.localizedCaseInsensitiveContains("openai") })
-        guard let groupName else { return nil }
+        var groupName = ""
+        var currentInfo: [String: Any]?
+        for candidate in preferredNames {
+            if let info = await clashProxyInfo(named: candidate) {
+                groupName = candidate
+                currentInfo = info
+                break
+            }
+        }
+        guard !groupName.isEmpty, var info = currentInfo else { return nil }
 
         var currentName = groupName
         var healthGroup = groupName
@@ -311,8 +320,7 @@ public class NetworkTools: ObservableObject {
         // 支持“手动 Selector → 自动 Fallback/URLTest → 实际节点”的嵌套组，日志展示最终出口节点，
         // 节点重测则命中真正负责自动切换的动态组。
         for _ in 0..<5 {
-            guard !visited.contains(currentName),
-                  let info = proxies[currentName] as? [String: Any] else { break }
+            guard !visited.contains(currentName) else { break }
             visited.insert(currentName)
             let type = ((info["type"] as? String) ?? "").lowercased()
             guard let next = info["now"] as? String, !next.isEmpty else { break }
@@ -320,15 +328,16 @@ public class NetworkTools: ObservableObject {
             if ["urltest", "fallback", "loadbalance"].contains(type) {
                 healthGroup = currentName
             }
+            guard let nextInfo = await clashProxyInfo(named: next) else { break }
             currentName = next
+            info = nextInfo
         }
 
-        let nodeInfo = proxies[currentName] as? [String: Any]
         return ClashProxySnapshot(
             group: groupName,
             healthGroup: healthGroup,
             node: currentName,
-            nodeType: nodeInfo?["type"] as? String ?? "未知协议"
+            nodeType: info["type"] as? String ?? "未知协议"
         )
     }
 
@@ -671,8 +680,41 @@ public class NetworkTools: ObservableObject {
             return
         }
 
-        let targetGroup = before.healthGroup.isEmpty ? before.group : before.healthGroup
-        addLog("🧭 重测 \(targetGroup)：当前出口 \(before.node)（\(before.nodeType)）", level: .info)
+        var targetGroup = before.healthGroup.isEmpty ? before.group : before.healthGroup
+        addLog("🧭 检查 \(before.group)：当前出口 \(before.node)（\(before.nodeType)）", level: .info)
+
+        // 热点/Wi-Fi 切换后 Mihomo 偶尔仍保留旧物理出口，表现为核心、端口和 TUN 都在，
+        // 但 DIRECT 与 PROXY 同时超时。手动一键修复先通过本地 API 轻量重建 TUN，
+        // 不杀进程、不改订阅、无需管理员权限；后台自动巡检不会调用本流程。
+        if await detectClashTunActive() {
+            addLog("🔄 先轻量重载 Clash TUN 通道并复检（不会重启 Wi-Fi）...", level: .info)
+            if await reloadClashTunChannel() {
+                let linksAfterReload = await quickConnectivityCheck()
+                if linksAfterReload.generalExternalOK && linksAfterReload.openAIOK {
+                    await MainActor.run {
+                        self.isRepairing = false
+                        self.lastOperationSuccess = true
+                        self.addLog("✅ Clash TUN 通道重载后网络已恢复，无需切换节点", level: .success)
+                    }
+                    return
+                }
+                addLog("TUN 通道已重载但外网仍不通，继续执行节点健康重测", level: .warning)
+            } else {
+                addLog("TUN 轻量重载未完成，继续尝试节点健康重测", level: .warning)
+            }
+        }
+
+        // 某些 Clash 配置用“手动 Selector → 自动 Fallback”的两层结构。若 Selector
+        // 被历史选择记录固定到单节点，单纯调用 group/delay 只会测速、不会自动切换。
+        // 用户主动点一键修复时允许恢复到现有的自动组；后台巡检不会修改用户选择。
+        if let automaticGroup = await selectAutomaticClashSubgroupIfAvailable(group: before.group) {
+            targetGroup = automaticGroup
+            addLog("🔁 已将 \(before.group) 恢复为自动故障转移组 \(automaticGroup)", level: .success)
+            try? await Task.sleep(nanoseconds: 300_000_000)
+        }
+
+        addLog("📡 开始重测 \(targetGroup) 的节点健康状态...", level: .info)
+
         let encodedGroup = percentEncodedPathComponent(targetGroup)
         let command = "/usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 15 'http://localhost/group/\(encodedGroup)/delay?url=https%3A%2F%2Fapi.openai.com%2Fv1%2Fmodels&timeout=5000' >/dev/null"
 
@@ -704,6 +746,43 @@ public class NetworkTools: ObservableObject {
                 self.lastOperationSuccess = false
                 self.addLog("❌ Clash 节点重测失败：\(error.localizedDescription)", level: .error)
             }
+        }
+    }
+
+    /// Selector 已包含自动组但当前被固定到单节点时，恢复选择自动组。
+    /// 只接受明确命名的本地自动组，避免根据不可信 API 文本拼接任意 shell/JSON。
+    private func selectAutomaticClashSubgroupIfAvailable(group groupName: String) async -> String? {
+        guard let info = await clashProxyInfo(named: groupName),
+              ((info["type"] as? String) ?? "").lowercased() == "selector",
+              let choices = info["all"] as? [String] else { return nil }
+
+        let acceptedNames = ["🤖 Codex自动", "Codex自动"]
+        guard let automatic = acceptedNames.first(where: choices.contains) else { return nil }
+        if (info["now"] as? String) == automatic { return automatic }
+
+        let encodedGroup = percentEncodedPathComponent(groupName)
+        let command = "/usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 3 -X PUT -H 'Content-Type: application/json' -d '{\"name\":\"\(automatic)\"}' 'http://localhost/proxies/\(encodedGroup)' >/dev/null"
+        guard (try? await executeCommand(command)) != nil else { return nil }
+        return automatic
+    }
+
+    /// 通过 Mihomo 本地 API 重建当前 TUN 通道，专门处理切换物理网络后的旧出口绑定。
+    /// 失败时尽力恢复 TUN 开启状态，避免修复动作本身留下断网状态。
+    private func reloadClashTunChannel() async -> Bool {
+        let socket = "/tmp/verge/verge-mihomo.sock"
+        let endpoint = "http://localhost/configs"
+        let disable = "/usr/bin/curl --unix-socket \(socket) -fsS --max-time 3 -X PATCH -H 'Content-Type: application/json' -d '{\"tun\":{\"enable\":false}}' \(endpoint) >/dev/null"
+        let enable = "/usr/bin/curl --unix-socket \(socket) -fsS --max-time 3 -X PATCH -H 'Content-Type: application/json' -d '{\"tun\":{\"enable\":true}}' \(endpoint) >/dev/null"
+
+        do {
+            _ = try await executeCommand(disable)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            _ = try await executeCommand(enable)
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            return await detectClashTunActive()
+        } catch {
+            _ = try? await executeCommand(enable)
+            return false
         }
     }
     
