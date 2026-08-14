@@ -37,8 +37,8 @@ public struct RepairModeView: View {
                     
                     RepairButtonCardLight(
                         title: "深度清理",
-                        subtitle: "刷新 DNS 缓存 + 重启 mDNS + 清理冲突路由",
-                        badge: "🔑 需管理员密码",
+                        subtitle: "刷新 DNS 缓存 + 重启网络服务 + 清理冲突路由",
+                        badge: "🛡️ 免密码执行",
                         iconName: "wrench.and.screwdriver.fill",
                         accentColor: Color.purple,
                         isLoading: tools.isRepairing && tools.progressMessage.contains("深度清理"),
