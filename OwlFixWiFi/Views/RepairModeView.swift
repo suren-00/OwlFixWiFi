@@ -21,8 +21,8 @@ public struct RepairModeView: View {
                 HStack(spacing: 12) {
                     RepairButtonCardLight(
                         title: "快速修复",
-                        subtitle: "一键清除 HTTP/SOCKS 代理并重置 DNS",
-                        badge: "⚡ 紧急首选 (3s)",
+                        subtitle: "只清失效代理/DNS残留，保留正在使用的Clash",
+                        badge: "⚡ 安全自动 (3s)",
                         iconName: "bolt.fill",
                         accentColor: Color.blue,
                         isLoading: tools.isRepairing && tools.progressMessage.contains("快速修复"),
@@ -37,8 +37,8 @@ public struct RepairModeView: View {
                     
                     RepairButtonCardLight(
                         title: "深度清理",
-                        subtitle: "刷新 DNS 缓存 + 重启网络服务 + 清理冲突路由",
-                        badge: "🛡️ 免密码执行",
+                        subtitle: "刷新DNS + 重启网络服务 + 重建Clash核心",
+                        badge: "🛡️ 手动·一次授权",
                         iconName: "wrench.and.screwdriver.fill",
                         accentColor: Color.purple,
                         isLoading: tools.isRepairing && tools.progressMessage.contains("深度清理"),
@@ -56,8 +56,8 @@ public struct RepairModeView: View {
                 HStack(spacing: 12) {
                     RepairButtonCardLight(
                         title: "TUN 专用修复",
-                        subtitle: "处理 Clash utun 虚拟网卡与 Fake-IP 冲突表",
-                        badge: "🦈 Clash 专属",
+                        subtitle: "只重建Clash TUN，不清理其他VPN虚拟网卡",
+                        badge: "🦈 手动·一次授权",
                         iconName: "arrow.triangle.merge",
                         accentColor: Color.orange,
                         isLoading: tools.isRepairing && tools.progressMessage.contains("Clash TUN"),

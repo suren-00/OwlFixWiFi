@@ -84,14 +84,74 @@ public class NetworkTools: ObservableObject {
         }.value
     }
     
-    /// 执行系统修复命令（免密码直接执行，零弹窗）
+    /// 执行确实需要管理员权限的命令。
+    ///
+    /// 自动巡检不会调用此方法；只有用户主动选择 TUN/深度修复时才会弹出一次系统授权。
+    /// macOS 不允许普通进程静默终止 root 权限的 Mihomo 或重置系统网络服务，不能把失败隐藏后冒充成功。
     public func executeSudoCommand(_ cmd: String) async throws -> String {
-        return try await executeCommand(cmd)
+        return try await Task.detached {
+            let escapedCmd = cmd
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
+            let source = "do shell script \"\(escapedCmd)\" with administrator privileges"
+
+            guard let script = NSAppleScript(source: source) else {
+                throw NSError(
+                    domain: "NetworkTools",
+                    code: 500,
+                    userInfo: [NSLocalizedDescriptionKey: "无法初始化系统授权请求"]
+                )
+            }
+
+            var errorInfo: NSDictionary?
+            let output = script.executeAndReturnError(&errorInfo)
+            if let errorInfo {
+                let message = errorInfo[NSAppleScript.errorMessage] as? String ?? "管理员授权被取消或命令执行失败"
+                throw NSError(
+                    domain: "NetworkTools",
+                    code: 403,
+                    userInfo: [NSLocalizedDescriptionKey: message]
+                )
+            }
+            return output.stringValue ?? ""
+        }.value
     }
-    
+
+    private struct ProxyEndpoint: Hashable {
+        let host: String
+        let port: Int
+    }
+
+    private struct ProxyAssessment {
+        var configured = false
+        var isExpected = false
+        var isResidual = false
+        var isManualRemoteProxy = false
+        var summary = "未开启"
+    }
+
+    private struct ClashProxySnapshot {
+        var group = ""
+        var healthGroup = ""
+        var node = ""
+        var nodeType = ""
+    }
+
+    public struct QuickConnectivityResult {
+        public var generalExternalOK = false
+        public var openAIOK = false
+        public var openAIStable = false
+        public var internalOK = false
+
+        public var externalOK: Bool {
+            generalExternalOK && openAIOK
+        }
+    }
+
     /// 单目标 HTTP 探测：curl 拿到 http_code 即连通（000=失败/超时）
     private func probeHTTP(_ url: String, timeout: Int) async -> Bool {
-        let cmd = "curl -o /dev/null -s -m \(timeout) -w '%{http_code}' '\(url)'"
+        let connectTimeout = min(3, timeout)
+        let cmd = "/usr/bin/curl -L -o /dev/null -sS --connect-timeout \(connectTimeout) -m \(timeout) -w '%{http_code}' '\(url)'"
         if let out = try? await executeCommand(cmd) {
             let code = out.trimmingCharacters(in: .whitespacesAndNewlines)
             return !code.isEmpty && code != "000"
@@ -99,21 +159,197 @@ public class NetworkTools: ObservableObject {
         return false
     }
     
-    /// 实际连通性快检（诊断/巡检用）：外网 gstatic 204 + 内网百度，并发执行，最坏 ~6 秒
-    public func quickConnectivityCheck() async -> (externalOK: Bool, internalOK: Bool) {
-        async let ext = probeHTTP("https://www.gstatic.com/generate_204", timeout: 6)
-        async let int = probeHTTP("https://www.baidu.com", timeout: 5)
-        return await (ext, int)
+    /// 实际连通性快检：同时覆盖通用代理规则与 OpenAI 专用规则。
+    /// OpenAI 连测两次，避免“Google/GitHub 正常但 Codex 节点间歇掉线”被误报为全网正常。
+    public func quickConnectivityCheck() async -> QuickConnectivityResult {
+        async let gstatic = probeHTTP("https://www.gstatic.com/generate_204", timeout: 6)
+        async let github = probeHTTP("https://github.com", timeout: 6)
+        async let openAI1 = probeHTTP("https://api.openai.com/v1/models", timeout: 6)
+        async let openAI2 = probeHTTP("https://api.openai.com/v1/models", timeout: 6)
+        async let domestic = probeHTTP("https://www.baidu.com", timeout: 5)
+        let values = await (gstatic, github, openAI1, openAI2, domestic)
+
+        return QuickConnectivityResult(
+            generalExternalOK: values.0 && values.1,
+            openAIOK: values.2 || values.3,
+            openAIStable: values.2 && values.3,
+            internalOK: values.4
+        )
+    }
+
+    private func detectClashCoreRunning() async -> Bool {
+        if (try? await executeCommand("test -S /tmp/verge/verge-mihomo.sock && /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 2 http://localhost/version >/dev/null")) != nil {
+            return true
+        }
+
+        let command = "for name in verge-mihomo mihomo clash-meta clash-premium sing-box; do /usr/bin/pgrep -x \"$name\" >/dev/null && exit 0; done; exit 1"
+        return (try? await executeCommand(command)) != nil
+    }
+
+    private func detectClashTunActive() async -> Bool {
+        if let config = try? await executeCommand("test -S /tmp/verge/verge-mihomo.sock && /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 2 http://localhost/configs"),
+           config.contains("\"tun\":{\"enable\":true") {
+            return true
+        }
+
+        return (try? await executeCommand("route -n get 198.18.0.1 2>/dev/null | grep -q 'interface: utun'")) != nil
+    }
+
+    private func enabledProxyEndpoint(from output: String) -> ProxyEndpoint? {
+        let lines = output.components(separatedBy: .newlines)
+        guard lines.contains(where: { $0.trimmingCharacters(in: .whitespaces) == "Enabled: Yes" }) else {
+            return nil
+        }
+
+        let host = lines.first(where: { $0.hasPrefix("Server:") })?
+            .replacingOccurrences(of: "Server:", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let portText = lines.first(where: { $0.hasPrefix("Port:") })?
+            .replacingOccurrences(of: "Port:", with: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        guard !host.isEmpty, let port = Int(portText), (1...65535).contains(port) else { return nil }
+        return ProxyEndpoint(host: host, port: port)
+    }
+
+    private func assessSystemProxy(clashRunning: Bool) async -> ProxyAssessment {
+        async let http = try? executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null")
+        async let https = try? executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null")
+        async let socks = try? executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null")
+        let outputs = await (http, https, socks)
+        let endpoints = [outputs.0, outputs.1, outputs.2].compactMap { value in
+            value.flatMap(enabledProxyEndpoint(from:))
+        }
+
+        guard !endpoints.isEmpty else { return ProxyAssessment() }
+
+        let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "::1"]
+        let localEndpoints = endpoints.filter { loopbackHosts.contains($0.host.lowercased()) }
+        if localEndpoints.count != endpoints.count {
+            return ProxyAssessment(
+                configured: true,
+                isExpected: false,
+                isResidual: false,
+                isManualRemoteProxy: true,
+                summary: "检测到手动/单位网络代理，已保护不自动修改"
+            )
+        }
+
+        var allListening = true
+        for endpoint in Set(localEndpoints) {
+            let listening = (try? await executeCommand("/usr/bin/nc -z -w 1 127.0.0.1 \(endpoint.port)")) != nil
+            allListening = allListening && listening
+        }
+
+        let ports = Set(localEndpoints.map(\.port)).sorted().map(String.init).joined(separator: ",")
+        if allListening {
+            return ProxyAssessment(
+                configured: true,
+                isExpected: true,
+                isResidual: false,
+                isManualRemoteProxy: false,
+                summary: clashRunning ? "Clash 正常使用本地端口 \(ports)" : "本地代理端口 \(ports) 正常监听"
+            )
+        }
+
+        return ProxyAssessment(
+            configured: true,
+            isExpected: false,
+            isResidual: true,
+            isManualRemoteProxy: false,
+            summary: "本地代理端口 \(ports) 未监听，属于失效残留"
+        )
+    }
+
+    private func residualLocalProxyServices() async -> [(name: String, disableCommand: String)] {
+        let specs = [
+            ("HTTP", "networksetup -getwebproxy Wi-Fi 2>/dev/null", "networksetup -setwebproxystate Wi-Fi off"),
+            ("HTTPS", "networksetup -getsecurewebproxy Wi-Fi 2>/dev/null", "networksetup -setsecurewebproxystate Wi-Fi off"),
+            ("SOCKS", "networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null", "networksetup -setsocksfirewallproxystate Wi-Fi off"),
+        ]
+        let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "::1"]
+        var residuals: [(name: String, disableCommand: String)] = []
+
+        for spec in specs {
+            guard let output = try? await executeCommand(spec.1),
+                  let endpoint = enabledProxyEndpoint(from: output),
+                  loopbackHosts.contains(endpoint.host.lowercased()) else { continue }
+            let listening = (try? await executeCommand("/usr/bin/nc -z -w 1 127.0.0.1 \(endpoint.port)")) != nil
+            if !listening {
+                residuals.append((name: spec.0, disableCommand: spec.2))
+            }
+        }
+        return residuals
+    }
+
+    private func configuredDNSContainsFakeIP() async -> Bool {
+        guard let output = try? await executeCommand("networksetup -getdnsservers Wi-Fi 2>/dev/null") else { return false }
+        return output.contains("198.18.") || output.contains("198.19.")
+    }
+
+    private func currentWiFiAddress() async -> String {
+        let output = (try? await executeCommand("ipconfig getifaddr en0 2>/dev/null || true")) ?? ""
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func clashProxySnapshot() async -> ClashProxySnapshot? {
+        guard let output = try? await executeCommand("test -S /tmp/verge/verge-mihomo.sock && /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 3 http://localhost/proxies"),
+              let data = output.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let proxies = root["proxies"] as? [String: Any] else {
+            return nil
+        }
+
+        let preferredNames = ["🤖 Codex专用", "Codex专用", "OpenAI", "AI云加速"]
+        let groupName = preferredNames.first(where: { proxies[$0] != nil })
+            ?? proxies.keys.sorted().first(where: { $0.localizedCaseInsensitiveContains("codex") || $0.localizedCaseInsensitiveContains("openai") })
+        guard let groupName else { return nil }
+
+        var currentName = groupName
+        var healthGroup = groupName
+        var visited: Set<String> = []
+
+        // 支持“手动 Selector → 自动 Fallback/URLTest → 实际节点”的嵌套组，日志展示最终出口节点，
+        // 节点重测则命中真正负责自动切换的动态组。
+        for _ in 0..<5 {
+            guard !visited.contains(currentName),
+                  let info = proxies[currentName] as? [String: Any] else { break }
+            visited.insert(currentName)
+            let type = ((info["type"] as? String) ?? "").lowercased()
+            guard let next = info["now"] as? String, !next.isEmpty else { break }
+
+            if ["urltest", "fallback", "loadbalance"].contains(type) {
+                healthGroup = currentName
+            }
+            currentName = next
+        }
+
+        let nodeInfo = proxies[currentName] as? [String: Any]
+        return ClashProxySnapshot(
+            group: groupName,
+            healthGroup: healthGroup,
+            node: currentName,
+            nodeType: nodeInfo?["type"] as? String ?? "未知协议"
+        )
+    }
+
+    private func percentEncodedPathComponent(_ value: String) -> String {
+        let unreserved = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~".utf8)
+        return value.utf8.map { byte in
+            unreserved.contains(byte) ? String(UnicodeScalar(byte)) : String(format: "%%%02X", byte)
+        }.joined()
     }
     
     /// 清理 Fake-IP DNS 残留（macOS 26 起 -setdnsservices 已移除，改用 -setdnsservers Empty；
     /// 仅当存在 198.18/198.19 残留时才清空，保护用户手动设置的正规 DNS）
-    private func clearFakeIPDNSIfNeeded() async -> Bool {
+    private func clearFakeIPDNSIfNeeded(force: Bool = false) async -> Bool {
         guard let dnsOut = try? await executeCommand("networksetup -getdnsservers Wi-Fi 2>/dev/null") else {
             return false
         }
         let hasFakeIP = dnsOut.contains("198.18.") || dnsOut.contains("198.19.")
         guard hasFakeIP else { return false }
+        if !force, await detectClashCoreRunning() {
+            return false
+        }
         do {
             _ = try await executeCommand("networksetup -setdnsservers Wi-Fi Empty")
             return true
@@ -128,21 +364,142 @@ public class NetworkTools: ObservableObject {
     public struct DiagnosisResult {
         public var hasIssues: Bool = false
         public var clashRunning: Bool = false
+        public var clashTunActive: Bool = false
         public var utunCount: Int = 0
+        /// 仅表示“失效的本地代理残留”，有效的 Clash 代理不会置为 true。
         public var proxyActive: Bool = false
+        public var proxyConfigured: Bool = false
+        public var proxyExpected: Bool = false
+        public var proxySummary: String = ""
         public var dnsAbnormal: Bool = false
         public var wifiNoIP: Bool = false
+        public var wifiAddress: String = ""
         public var externalOK: Bool = false
+        public var generalExternalOK: Bool = false
+        public var openAIOK: Bool = false
+        public var openAIStable: Bool = false
         public var internalOK: Bool = false
         public var connectivityChecked: Bool = false
+        public var activeClashGroup: String = ""
+        public var activeClashNode: String = ""
+        public var activeClashNodeType: String = ""
         public var recommendedFix: String = ""
         public var description: String = ""
+    }
+
+    private func collectDiagnosis(writeLogs: Bool) async -> DiagnosisResult {
+        var result = DiagnosisResult()
+
+        async let coreRunning = detectClashCoreRunning()
+        async let tunActive = detectClashTunActive()
+        async let address = currentWiFiAddress()
+        async let fakeDNS = configuredDNSContainsFakeIP()
+        async let connectivity = quickConnectivityCheck()
+        async let proxySnapshot = clashProxySnapshot()
+        async let utunOutput = try? executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'")
+
+        result.clashRunning = await coreRunning
+        result.clashTunActive = await tunActive
+        result.wifiAddress = await address
+        result.wifiNoIP = result.wifiAddress.isEmpty || result.wifiAddress.hasPrefix("169.254.")
+
+        if let output = await utunOutput,
+           let count = Int(output.trimmingCharacters(in: .whitespacesAndNewlines)) {
+            result.utunCount = count
+        }
+
+        let proxy = await assessSystemProxy(clashRunning: result.clashRunning)
+        result.proxyConfigured = proxy.configured
+        result.proxyExpected = proxy.isExpected
+        result.proxyActive = proxy.isResidual
+        result.proxySummary = proxy.summary
+
+        let hasFakeDNS = await fakeDNS
+        result.dnsAbnormal = hasFakeDNS && !result.clashRunning
+
+        let links = await connectivity
+        result.generalExternalOK = links.generalExternalOK
+        result.openAIOK = links.openAIOK
+        result.openAIStable = links.openAIStable
+        result.externalOK = links.externalOK
+        result.internalOK = links.internalOK
+        result.connectivityChecked = true
+
+        if let snapshot = await proxySnapshot {
+            result.activeClashGroup = snapshot.group
+            result.activeClashNode = snapshot.node
+            result.activeClashNodeType = snapshot.nodeType
+        }
+
+        // 仅把明确属于 Clash 的 Fake-IP TUN 路由算作残留；系统里其他 VPN 的 utun 数量不参与异常判断。
+        let residualTun = result.clashTunActive && !result.clashRunning
+        let configIssues = residualTun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        let clashExternalFailure = result.clashRunning && (!result.generalExternalOK || !result.openAIOK)
+        let clashExternalUnstable = result.clashRunning && result.generalExternalOK && result.openAIOK && !result.openAIStable
+        let pureNetworkSideIssue = !result.clashRunning && !result.externalOK && !configIssues
+
+        result.hasIssues = configIssues || clashExternalFailure || clashExternalUnstable || pureNetworkSideIssue
+
+        if result.wifiNoIP {
+            result.recommendedFix = "Wi-Fi 重置"
+            result.description = result.wifiAddress.hasPrefix("169.254.")
+                ? "Wi-Fi 已连接但只拿到 169.254 自分配地址，DHCP 未成功分配 IP"
+                : "Wi-Fi 未获取到 IP 地址，需要手动重置并检查路由器 DHCP"
+        } else if residualTun {
+            result.recommendedFix = "TUN 专用修复"
+            result.description = "Clash 核心已退出，但 Fake-IP TUN 路由仍残留"
+        } else if result.proxyActive || result.dnsAbnormal {
+            result.recommendedFix = "快速修复"
+            if result.proxyActive && result.dnsAbnormal {
+                result.description = "Clash 本地代理端口失效且存在 Fake-IP DNS 残留"
+            } else if result.proxyActive {
+                result.description = result.proxySummary
+            } else {
+                result.description = "Clash 已停止，但系统仍保留 Fake-IP DNS"
+            }
+        } else if clashExternalFailure || clashExternalUnstable {
+            result.recommendedFix = "Clash 节点重测"
+            let nodeText = result.activeClashNode.isEmpty
+                ? "当前 Clash 策略节点"
+                : "\(result.activeClashGroup) 的 \(result.activeClashNode)（\(result.activeClashNodeType)）"
+            if clashExternalUnstable {
+                result.description = "\(nodeText) 出现间歇超时，建议重测并自动选择健康节点"
+            } else if result.internalOK {
+                result.description = "国内网络正常，但 \(nodeText) 无法稳定访问海外/OpenAI"
+            } else {
+                result.description = "内外网均异常，需先重测 Clash 节点；若仍失败再检查 Wi-Fi/宽带"
+            }
+        } else if pureNetworkSideIssue {
+            result.recommendedFix = "网络侧检查"
+            result.description = result.internalOK
+                ? "本地网络可用但海外链路不通，且未检测到可用的 Clash 核心"
+                : "已取得 IP 但内外网均不通，疑似 Wi-Fi 认证、路由器或运营商故障"
+        } else {
+            result.description = result.clashRunning
+                ? "Clash、系统代理与 OpenAI 节点链路均正常"
+                : "网络状态正常"
+        }
+
+        if writeLogs {
+            addLog(result.clashRunning ? "检测到 Clash/Mihomo 核心正常运行" : "未检测到可响应的 Clash/Mihomo 核心", level: result.clashRunning ? .info : .warning)
+            addLog("TUN 状态：\(result.clashTunActive ? "已启用" : "未启用")；系统 utun 共 \(result.utunCount) 个", level: .info)
+            if result.proxyConfigured {
+                addLog("系统代理：\(result.proxySummary)", level: result.proxyActive ? .warning : .info)
+            }
+            if result.wifiNoIP {
+                addLog("Wi-Fi IP 异常：\(result.wifiAddress.isEmpty ? "未获取" : result.wifiAddress)", level: .warning)
+            }
+            addLog(
+                "🧪 连通性：通用外网\(result.generalExternalOK ? "✅" : "❌") OpenAI\(result.openAIOK ? (result.openAIStable ? "✅稳定" : "⚠️间歇") : "❌") 国内\(result.internalOK ? "✅" : "❌")",
+                level: result.hasIssues ? .warning : .info
+            )
+        }
+
+        return result
     }
     
     /// 执行智能诊断（只检测，不修复）
     public func diagnoseNetwork() async -> DiagnosisResult {
-        var result = DiagnosisResult()
-        
         await MainActor.run {
             self.isDiagnosing = true
             self.progressMessage = "正在智能诊断网络问题..."
@@ -150,99 +507,7 @@ public class NetworkTools: ObservableObject {
         
         addLog("🧠 开始智能网络诊断...", level: .info)
         
-        // 1. 检查 Clash / Mihomo 进程
-        do {
-            let clashOut = try await executeCommand("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' || true")
-            if !clashOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result.clashRunning = true
-                addLog("检测到代理核心进程 (Clash/Mihomo) 在运行", level: .warning)
-            }
-        } catch {}
-        
-        // 2. 检查 utun 接口数量
-        do {
-            let utunOut = try await executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'")
-            if let count = Int(utunOut.trimmingCharacters(in: .whitespacesAndNewlines)), count > 0 {
-                result.utunCount = count
-                addLog("发现 \(count) 个 utun 虚拟网卡接口", level: .warning)
-            }
-        } catch {}
-        
-        // 3. 检查代理状态
-        do {
-            let httpProxy = try await executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null")
-            let httpsProxy = try await executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null")
-            let socksProxy = try await executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null")
-            
-            if httpProxy.contains("Enabled: Yes") || httpsProxy.contains("Enabled: Yes") || socksProxy.contains("Enabled: Yes") {
-                result.proxyActive = true
-                addLog("检测到代理配置开启", level: .warning)
-            }
-        } catch {}
-        
-        // 4. 检查 DNS 配置
-        do {
-            let dnsOut = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $3}'")
-            let dnsList = dnsOut.components(separatedBy: .newlines).filter { !$0.isEmpty }
-            // 如果只有 Fake-IP 网段的 DNS 则异常
-            let fakeIPDNS = dnsList.filter { $0.hasPrefix("198.18.") || $0.hasPrefix("198.19.") }
-            if !fakeIPDNS.isEmpty {
-                result.dnsAbnormal = true
-                addLog("检测到 Clash Fake-IP DNS 配置", level: .warning)
-            }
-        } catch {}
-        
-        // 5. 实际连通性快检：配置检查发现不了"有 IP 但外网不通"（认证/路由器/运营商问题），
-        //    用 gstatic 204（外网）+ 百度（内网）实测，总耗时最坏 ~6 秒
-        let (extOK, intOK) = await quickConnectivityCheck()
-        result.externalOK = extOK
-        result.internalOK = intOK
-        result.connectivityChecked = true
-        addLog("🧪 连通性快检：外网\(extOK ? "✅通" : "❌不通") 内网\(intOK ? "✅通" : "❌不通")", level: extOK ? .info : .warning)
-        
-        // 判断是否有问题：
-        // 1. Clash 退出后的 utun 残留、代理残留、Fake-IP DNS 残留、Wi-Fi 无 IP 属于明确配置异常；
-        // 2. Clash 运行中但外网不通（内网正常）属于 Clash 节点失效 / TUN DNS 脱轨，需推荐 TUN 修复；
-        // 3. 仅当 Clash 未运行且配置正常但外网仍不通时，才判定为真正的“网络侧问题”（WiFi 认证/路由器/运营商）。
-        let residualUtun = result.utunCount > 0 && !result.clashRunning
-        let configIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
-        let clashExternalFailure = result.clashRunning && !extOK
-        let pureNetworkSideIssue = !result.clashRunning && !extOK && !configIssues
-        
-        result.hasIssues = configIssues || clashExternalFailure || pureNetworkSideIssue
-        
-        // 确定推荐修复方案
-        if configIssues {
-            if result.wifiNoIP && result.clashRunning {
-                result.recommendedFix = "TUN 专用修复"
-                result.description = "Wi-Fi 未获取到 IP，疑似 Clash TUN 占用，需专项修复"
-            } else if result.wifiNoIP {
-                result.recommendedFix = "Wi-Fi 重置"
-                result.description = "Wi-Fi 未获取到 IP 地址，需要重置网络"
-            } else if residualUtun {
-                result.recommendedFix = "深度清理"
-                result.description = "utun 虚拟网卡残留（Clash 未运行），需要清理"
-            } else if result.proxyActive || result.dnsAbnormal {
-                result.recommendedFix = "快速修复"
-                result.description = "代理或 DNS 配置异常，需要重置"
-            } else {
-                result.recommendedFix = "快速修复"
-                result.description = "检测到潜在网络问题，建议全面检查"
-            }
-        } else if clashExternalFailure {
-            result.recommendedFix = "TUN 专用修复"
-            result.description = intOK
-                ? "国内网络正常但外网不通，疑似 Clash 节点失效、TUN 脱轨或未开启系统代理"
-                : "内外网均不通，疑似 Clash TUN 虚拟路由冲突或节点断开"
-        } else if pureNetworkSideIssue {
-            result.recommendedFix = "网络侧检查"
-            result.description = intOK
-                ? "网络配置正常但外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商），修复工具无法解决"
-                : "网络配置正常但内外网均不通，疑似网络已断开或网络侧故障"
-        } else {
-            result.recommendedFix = ""
-            result.description = (result.clashRunning && result.utunCount > 0) ? "Clash TUN 运行正常，网络健康" : "网络状态正常"
-        }
+        let result = await collectDiagnosis(writeLogs: true)
         
         await MainActor.run {
             self.isDiagnosing = false
@@ -284,6 +549,10 @@ public class NetworkTools: ObservableObject {
         
         // Step 3: 执行修复
         switch diagnosis.recommendedFix {
+        case "Clash 节点重测":
+            addLog("💡 检测到节点链路不稳定，重新测速并让策略组选择健康节点...", level: .info)
+            await refreshClashNodeHealth()
+
         case "TUN 专用修复":
             addLog("💡 检测到 Clash TUN 问题，执行专项清理...", level: .info)
             await tunFix()
@@ -302,16 +571,21 @@ public class NetworkTools: ObservableObject {
             
         case "网络侧检查":
             addLog("⚠️ 网络配置正常但外网不通，属于网络侧问题（公共 WiFi 认证 / 路由器 / 运营商），修复工具无法解决。建议：1) 公共 WiFi 打开浏览器完成认证 2) 检查路由器/光猫是否正常 3) 联系运营商", level: .warning)
+            await MainActor.run { self.lastOperationSuccess = false }
             
         default:
-            addLog("⚠️ 未明确问题类型，执行全面检查...", level: .warning)
-            await fullFix()
+            addLog("⚠️ 未明确问题类型，为避免误改网络配置，本次只报告问题，不自动执行深度清理", level: .warning)
+            await MainActor.run { self.lastOperationSuccess = false }
         }
-        
+
+        let succeeded = await MainActor.run { self.lastOperationSuccess == true }
         await MainActor.run {
             self.isRepairing = false
-            self.lastOperationSuccess = true
-            self.addLog("✅ 智能一键修复完成！", level: .success)
+            if succeeded {
+                self.addLog("✅ 智能一键修复完成并通过结果校验", level: .success)
+            } else {
+                self.addLog("⚠️ 本次未确认恢复，请按日志建议继续手动处理", level: .warning)
+            }
         }
     }
     
@@ -325,56 +599,111 @@ public class NetworkTools: ObservableObject {
             self.lastOperationSuccess = nil
         }
         
-        addLog("⚡ 开始执行快速修复流程...", level: .info)
+        addLog("⚡ 开始执行安全快速修复（有效 Clash 配置会被保留）...", level: .info)
         var stepCount = 0
-        
-        // 1. Web Proxy
-        do {
-            _ = try await executeCommand("networksetup -setwebproxystate Wi-Fi off")
-            // 清除代理服务器地址
-            _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
-            addLog("关闭 HTTP 代理状态", level: .success)
-            stepCount += 1
-        } catch {
-            addLog("关闭 HTTP 代理失败：\(error.localizedDescription)", level: .warning)
+        var hadFailure = false
+        let clashRunning = await detectClashCoreRunning()
+        let proxyBefore = await assessSystemProxy(clashRunning: clashRunning)
+
+        if proxyBefore.isResidual {
+            let residualServices = await residualLocalProxyServices()
+            for service in residualServices {
+                do {
+                    _ = try await executeCommand(service.disableCommand)
+                    addLog("关闭失效的 \(service.name) 代理状态", level: .success)
+                    stepCount += 1
+                } catch {
+                    hadFailure = true
+                    addLog("关闭 \(service.name) 代理失败：\(error.localizedDescription)", level: .error)
+                }
+            }
+        } else if proxyBefore.configured {
+            addLog("已保留有效代理：\(proxyBefore.summary)", level: .info)
+        } else {
+            addLog("未发现系统代理残留", level: .info)
         }
-        
-        // 2. Secure Web Proxy
-        do {
-            _ = try await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
-            _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
-            addLog("关闭 HTTPS 代理状态", level: .success)
-            stepCount += 1
-        } catch {
-            addLog("关闭 HTTPS 代理失败：\(error.localizedDescription)", level: .warning)
-        }
-        
-        // 3. SOCKS Proxy
-        do {
-            _ = try await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
-            _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
-            addLog("关闭 SOCKS 代理状态", level: .success)
-            stepCount += 1
-        } catch {
-            addLog("关闭 SOCKS 代理失败：\(error.localizedDescription)", level: .warning)
-        }
-        
-        // 4. DNS 残留清理（macOS 26 起 -setdnsservices 已移除，改用 -setdnsservers Empty；
-        //    仅当存在 Fake-IP(198.18/198.19) 残留时才清空，避免误删用户手动设置的正规 DNS）
-        do {
-            if await clearFakeIPDNSIfNeeded() {
-                addLog("已清除 Fake-IP DNS 残留（198.18.x.x）", level: .success)
+
+        if await configuredDNSContainsFakeIP() {
+            if clashRunning {
+                addLog("Fake-IP DNS 由正在运行的 Clash 使用，已保护不清除", level: .info)
+            } else if await clearFakeIPDNSIfNeeded() {
+                addLog("已清除 Clash 停止后遗留的 Fake-IP DNS", level: .success)
                 stepCount += 1
             } else {
-                addLog("DNS 配置正常（无 Fake-IP 残留），跳过重置", level: .info)
+                hadFailure = true
+                addLog("Fake-IP DNS 残留清理失败", level: .error)
             }
+        } else {
+            addLog("DNS 配置正常（无 Fake-IP 残留）", level: .info)
         }
-        
+
+        let proxyAfter = await assessSystemProxy(clashRunning: await detectClashCoreRunning())
+        let fakeDNSAfter = await configuredDNSContainsFakeIP()
+        let coreRunningAfter = await detectClashCoreRunning()
+        let dnsAfterAbnormal = fakeDNSAfter && !coreRunningAfter
+        let verified = !hadFailure && !proxyAfter.isResidual && !dnsAfterAbnormal
         let completedSteps = stepCount
         await MainActor.run {
             self.isRepairing = false
-            self.lastOperationSuccess = true
-            self.addLog("✅ 快速修复完成，已重置 \(completedSteps) 项网络配置", level: .success)
+            self.lastOperationSuccess = verified
+            if verified {
+                self.addLog("✅ 快速修复校验通过，处理 \(completedSteps) 项；有效 Clash 代理保持不变", level: .success)
+            } else {
+                self.addLog("❌ 快速修复后仍检测到残留，未冒充修复成功", level: .error)
+            }
+        }
+    }
+
+    /// 重新测试 OpenAI/Codex 策略组。URLTest 组会依据测速结果自动改选健康节点；不改订阅文件。
+    public func refreshClashNodeHealth() async {
+        await MainActor.run {
+            self.isRepairing = true
+            self.progressMessage = "正在重测 Clash 节点..."
+            self.lastOperationSuccess = nil
+        }
+
+        guard let before = await clashProxySnapshot(), !before.group.isEmpty else {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("❌ 未找到可控制的 Clash Verge 策略组，请先确认 Clash 内核已启动", level: .error)
+            }
+            return
+        }
+
+        let targetGroup = before.healthGroup.isEmpty ? before.group : before.healthGroup
+        addLog("🧭 重测 \(targetGroup)：当前出口 \(before.node)（\(before.nodeType)）", level: .info)
+        let encodedGroup = percentEncodedPathComponent(targetGroup)
+        let command = "/usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 15 'http://localhost/group/\(encodedGroup)/delay?url=https%3A%2F%2Fapi.openai.com%2Fv1%2Fmodels&timeout=5000' >/dev/null"
+
+        do {
+            _ = try await executeCommand(command)
+            try? await Task.sleep(nanoseconds: 500_000_000)
+            let after = await clashProxySnapshot()
+            let links = await quickConnectivityCheck()
+            let selected = after?.node ?? before.node
+            if selected != before.node {
+                addLog("🔄 策略组已从 \(before.node) 切换为 \(selected)", level: .success)
+            } else {
+                addLog("策略组测速后继续使用 \(selected)", level: .info)
+            }
+
+            let healthy = links.generalExternalOK && links.openAIOK
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = healthy
+                if healthy {
+                    self.addLog("✅ 节点重测完成：OpenAI/Codex 链路已恢复", level: .success)
+                } else {
+                    self.addLog("❌ 节点重测后 OpenAI 仍不可用，需在 Clash 中手动改选 TCP/AnyTLS 节点或检查订阅", level: .error)
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("❌ Clash 节点重测失败：\(error.localizedDescription)", level: .error)
+            }
         }
     }
     
@@ -382,55 +711,49 @@ public class NetworkTools: ObservableObject {
     public func fullFix() async {
         await MainActor.run {
             self.isRepairing = true
-            self.progressMessage = "正在执行深度清理 (免密码直接生效)..."
+            self.progressMessage = "正在执行深度清理（需一次系统授权）..."
             self.lastOperationSuccess = nil
         }
         
         addLog("🔧 开始执行深度清理流程...", level: .info)
-        
-        // First run quick fix steps
-        addLog("步骤 1/6: 重置代理与 DNS 设置", level: .info)
-        _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = await clearFakeIPDNSIfNeeded()
-        addLog("代理与 DNS 已重置", level: .success)
-        
-        // Sudo elevated operations
-        addLog("步骤 2/6: 弹出系统权限请求以刷新 DNS 缓存与路由...", level: .info)
+        let clashWasRunning = await detectClashCoreRunning()
+        addLog("将弹出一次系统授权：重启 Clash 核心、刷新 DNS、重置 Wi-Fi 与 DHCP", level: .info)
         
         do {
             let sudoCmd = """
-            # 终止 Clash 进程与界面（免密码直接执行）
-            pkill -f "Clash Verge" 2>/dev/null || true
-            pkill -f clash-verge 2>/dev/null || true
-            pkill -f "clash.*--tun|clash.*-t" 2>/dev/null || true
-            pkill -i clash 2>/dev/null || true
-            
-            # 清理代理与 DNS 缓存
-            networksetup -setwebproxystate Wi-Fi off 2>/dev/null || true
-            networksetup -setsecurewebproxystate Wi-Fi off 2>/dev/null || true
-            networksetup -setsocksfirewallproxystate Wi-Fi off 2>/dev/null || true
-            dscacheutil -flushcache
-            
-            # 重启 Wi-Fi 网络服务刷新路由与 DHCP
-            networksetup -setnetworkserviceenabled Wi-Fi off 2>/dev/null || true
+            tun_interface=$(route -n get 198.18.0.1 2>/dev/null | awk '/interface:/{print $2}')
+            pkill -TERM -f '/verge-mihomo' 2>/dev/null || true
+            sleep 2
+            pkill -9 -f '/verge-mihomo' 2>/dev/null || true
+            if [ -n "$tun_interface" ]; then ifconfig "$tun_interface" down 2>/dev/null || true; fi
+            dscacheutil -flushcache || exit 21
+            killall -HUP mDNSResponder || exit 22
+            networksetup -setnetworkserviceenabled Wi-Fi off || exit 23
             sleep 1
-            networksetup -setnetworkserviceenabled Wi-Fi on 2>/dev/null || true
+            networksetup -setnetworkserviceenabled Wi-Fi on || exit 24
+            sleep 2
+            ipconfig set en0 DHCP || exit 25
             """
             
-            _ = try await executeCommand(sudoCmd)
-            addLog("Clash 进程已安全终止", level: .success)
-            addLog("系统代理与 DNS 缓存已清除", level: .success)
-            addLog("Wi-Fi 服务已重置并刷新路由表", level: .success)
-            
+            _ = try await executeSudoCommand(sudoCmd)
+            if clashWasRunning {
+                _ = try? await executeCommand("open -g -a 'Clash Verge'")
+            }
+            try? await Task.sleep(nanoseconds: 4_000_000_000)
+            let address = await currentWiFiAddress()
+            let usableIP = !address.isEmpty && !address.hasPrefix("169.254.")
+            let detectedCore = await detectClashCoreRunning()
+            let coreRecovered = !clashWasRunning || detectedCore
+            let verified = usableIP && coreRecovered
+
             await MainActor.run {
                 self.isRepairing = false
-                self.lastOperationSuccess = true
-                self.addLog("✅ 深度清理完成（免密码直接生效）！", level: .success)
+                self.lastOperationSuccess = verified
+                if verified {
+                    self.addLog("✅ 深度清理校验通过：Wi-Fi 已取得 \(address)，Clash 状态已恢复", level: .success)
+                } else {
+                    self.addLog("❌ 深度清理后校验未通过：IP=\(address.isEmpty ? "未获取" : address)，Clash 核心=\(coreRecovered ? "正常" : "未恢复")", level: .error)
+                }
             }
         } catch {
             await MainActor.run {
@@ -449,19 +772,38 @@ public class NetworkTools: ObservableObject {
             self.lastOperationSuccess = nil
         }
         
-        addLog("📶 开始重置 Wi-Fi 网络服务并请求 DHCP...", level: .info)
-        _ = try? await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi off")
-        try? await Task.sleep(nanoseconds: 1_500_000_000)
-        _ = try? await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi on")
-        try? await Task.sleep(nanoseconds: 2_500_000_000)
-        _ = try? await executeCommand("ipconfig set en0 DHCP 2>/dev/null || true")
-        addLog("✅ Wi-Fi 重置完成，已重新发起 DHCP IP 请求", level: .success)
-        addLog("💡 提示：若重置后仍未分配到 IP，多为路由器 DHCP 地址池耗尽或开启了 MAC 轮换限制，建议：1) 重启无线路由器 2) 在系统 Wi-Fi 设置中关闭【专用无线局域网地址】", level: .info)
-        
-        await MainActor.run {
-            self.isRepairing = false
-            self.lastOperationSuccess = true
+        addLog("📶 开始手动重置 Wi-Fi 网络服务并请求 DHCP...", level: .info)
+        do {
+            _ = try await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi off")
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            _ = try await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi on")
+            try? await Task.sleep(nanoseconds: 2_500_000_000)
+            _ = try await executeCommand("ipconfig set en0 DHCP")
+
+            var address = await currentWiFiAddress()
+            for _ in 0..<5 where address.isEmpty || address.hasPrefix("169.254.") {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                address = await currentWiFiAddress()
+            }
+            let verified = !address.isEmpty && !address.hasPrefix("169.254.")
+            let verifiedAddress = address
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = verified
+                if verified {
+                    self.addLog("✅ Wi-Fi 重置校验通过，已取得 IP：\(verifiedAddress)", level: .success)
+                } else {
+                    self.addLog("❌ Wi-Fi 重置后仍未取得有效 IP，属于 DHCP/路由器侧问题，不能报告为已修复", level: .error)
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("❌ Wi-Fi 重置命令失败：\(error.localizedDescription)", level: .error)
+            }
         }
+        addLog("💡 若仍为 169.254，请关闭该 Wi-Fi 的【专用无线局域网地址】并清理光猫 DHCP 租约/设备限制", level: .info)
     }
     
     /// 3. Clash TUN Specialized Mode (TUN 专用模式)
@@ -474,36 +816,51 @@ public class NetworkTools: ObservableObject {
         
         addLog("🦈 启动 Clash TUN 专用修复模式...", level: .info)
         
-        // 1. 终止 Clash 用户进程（免密码直接终止，零弹窗）
-        addLog("步骤 1/3: 安全终止 Clash 前台应用与连接...", level: .info)
-        let tunCmd = """
-        pkill -f "Clash Verge" 2>/dev/null || true
-        pkill -f clash-verge 2>/dev/null || true
-        pkill -f "clash.*--tun" 2>/dev/null || true
-        pkill -i clash 2>/dev/null || true
+        let coreWasRunning = await detectClashCoreRunning()
+        addLog("将弹出一次系统授权，仅重启 Mihomo 核心并释放其 Fake-IP TUN；不会删除其他 VPN 的 utun", level: .info)
+        let command = """
+        tun_interface=$(route -n get 198.18.0.1 2>/dev/null | awk '/interface:/{print $2}')
+        pkill -TERM -f '/verge-mihomo' 2>/dev/null || true
+        sleep 2
+        pkill -9 -f '/verge-mihomo' 2>/dev/null || true
+        if [ -n "$tun_interface" ]; then ifconfig "$tun_interface" down 2>/dev/null || true; fi
+        dscacheutil -flushcache || exit 31
+        killall -HUP mDNSResponder || exit 32
         """
-        _ = try? await executeCommand(tunCmd)
-        addLog("Clash 进程已安全释放", level: .success)
-        
-        // 2. Clear proxy states
-        addLog("步骤 2/3: 清除代理配置...", level: .info)
-        _ = try? await executeCommand("networksetup -setwebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setwebproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = try? await executeCommand("networksetup -setsecurewebproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsecurewebproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = try? await executeCommand("networksetup -setsocksfirewallproxystate Wi-Fi off")
-        _ = try? await executeCommand("networksetup -setsocksfirewallproxieserver Wi-Fi \"\" 2>/dev/null || true")
-        _ = await clearFakeIPDNSIfNeeded()
-        addLog("代理配置已清除", level: .success)
-        
-        // 3. 等待系统确认释放
-        addLog("步骤 3/3: 等待系统确认 utun 释放...", level: .info)
-        try? await Task.sleep(nanoseconds: 1_000_000_000)
-        
-        await MainActor.run {
-            self.isRepairing = false
-            self.lastOperationSuccess = true
-            self.addLog("✅ TUN 专用修复完成！Clash 进程和 utun 接口已彻底清理，建议在规则建议面板中检查 config.yaml 分流配置", level: .success)
+
+        do {
+            _ = try await executeSudoCommand(command)
+            if coreWasRunning {
+                _ = try? await executeCommand("open -g -a 'Clash Verge'")
+            }
+
+            var coreRecovered = !coreWasRunning
+            for _ in 0..<8 where !coreRecovered {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                coreRecovered = await detectClashCoreRunning()
+            }
+            let tunRecovered = await detectClashTunActive()
+            let verified = coreWasRunning ? (coreRecovered && tunRecovered) : !tunRecovered
+            let links = verified && coreRecovered ? await quickConnectivityCheck() : QuickConnectivityResult()
+
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = verified
+                if verified {
+                    self.addLog("✅ TUN 修复校验通过：Mihomo 核心与 TUN 路由已重建", level: .success)
+                    if !links.openAIOK {
+                        self.addLog("⚠️ TUN 已恢复但 OpenAI 仍不通，根因是节点/订阅而不是虚拟网卡", level: .warning)
+                    }
+                } else {
+                    self.addLog("❌ TUN 修复后核心或路由未恢复，未冒充修复成功", level: .error)
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("❌ TUN 修复中断：\(error.localizedDescription)", level: .error)
+            }
         }
     }
     
@@ -512,59 +869,32 @@ public class NetworkTools: ObservableObject {
         await MainActor.run {
             self.isRepairing = true
             self.progressMessage = "正在进行全面网络诊断..."
+            self.lastOperationSuccess = nil
         }
         
         addLog("📊 开始全面网络状态诊断...", level: .info)
-        
-        // WiFi & IP Check
-        do {
-            let ip = try await executeCommand("ipconfig getifaddr en0 2>/dev/null || echo '未获取'")
-            let gateway = try await executeCommand("route -n get default 2>/dev/null | grep gateway | awk '{print $2}' || echo '未知'")
-            addLog("📡 [WiFi 状态] IP: \(ip.trimmingCharacters(in: .whitespacesAndNewlines)) | 网关：\(gateway.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
-        } catch {}
-        
-        // DNS Check
-        do {
-            let dns = try await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $3}' | tr '\\n' ' '")
-            addLog("🌐 [DNS 服务器] \(dns.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
-        } catch {}
-        
-        // Proxy Check
-        do {
-            let http = try await executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null")
-            let https = try await executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null")
-            let socks = try await executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null")
-            addLog("🔗 [代理状态] HTTP: \(http.trimmingCharacters(in: .whitespacesAndNewlines)) | HTTPS: \(https.trimmingCharacters(in: .whitespacesAndNewlines)) | SOCKS: \(socks.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
-        } catch {}
-        
-        // Clash / Mihomo Check
-        do {
-            let clashProc = try await executeCommand("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' || true")
-            let isClashRunning = !clashProc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            addLog("🦈 [Clash/Mihomo 状态] 进程运行：\(isClashRunning ? "YES" : "NO")", level: isClashRunning ? .warning : .info)
-        } catch {}
-        
-        // utun Check
-        do {
-            let utunCount = try await executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'")
-            let count = utunCount.trimmingCharacters(in: .whitespacesAndNewlines)
-            addLog("🛜 [utun 接口] 数量：\(count)", level: Int(count) ?? 0 > 0 ? .warning : .info)
-        } catch {}
-        
-        // Ping Test
-        addLog("🌐 [网络连通性测试] 正在 Ping 测试 8.8.8.8 (Google DNS)...", level: .info)
-        do {
-            let pingRes = try await executeCommand("ping -c 2 -W 1500 8.8.8.8 2>/dev/null || echo 'FAIL'")
-            if pingRes.contains("2 packets received") || pingRes.contains("1 packets received") {
-                addLog("8.8.8.8 连通性测试：✅ 正常响应", level: .success)
-            } else {
-                addLog("8.8.8.8 连通性测试：❌ 无法 Ping 通", level: .warning)
-            }
-        } catch {}
-        
+        let result = await collectDiagnosis(writeLogs: true)
+        let gateway = ((try? await executeCommand("route -n get default 2>/dev/null | awk '/gateway:/{print $2}'")) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let dns = ((try? await executeCommand("networksetup -getdnsservers Wi-Fi 2>/dev/null")) ?? "未知")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\n", with: ", ")
+        addLog("📡 [物理网络] IP：\(result.wifiAddress.isEmpty ? "未获取" : result.wifiAddress)；网关：\(gateway.isEmpty ? "未知" : gateway)", level: result.wifiNoIP ? .warning : .info)
+        addLog("🌐 [Wi-Fi DNS] \(dns)", level: result.dnsAbnormal ? .warning : .info)
+        if !result.activeClashNode.isEmpty {
+            addLog("🧭 [Clash 策略] \(result.activeClashGroup) → \(result.activeClashNode)（\(result.activeClashNodeType)）", level: .info)
+        }
+        if result.hasIssues {
+            addLog("📋 诊断建议：【\(result.recommendedFix)】\(result.description)", level: .warning)
+        }
+
         await MainActor.run {
             self.isRepairing = false
-            self.addLog("✅ 网络诊断完毕，详细报告已输出至日志控制台", level: .success)
+            self.lastOperationSuccess = !result.hasIssues
+            self.addLog(
+                result.hasIssues ? "⚠️ 网络诊断完成，已定位异常并给出对应处理建议" : "✅ 网络诊断完成，所有关键链路校验正常",
+                level: result.hasIssues ? .warning : .success
+            )
         }
     }
     
@@ -580,6 +910,9 @@ public class NetworkTools: ObservableObject {
     public func auditClashConfig() -> ClashConfigResult {
         let homeDir = FileManager.default.homeDirectoryForCurrentUser.path
         let possiblePaths = [
+            "\(homeDir)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml",
+            "\(homeDir)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/config.yaml",
+            "\(homeDir)/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/profiles/Merge.yaml",
             "\(homeDir)/.config/clash/config.yaml",
             "\(homeDir)/Library/Application Support/clash/config.yaml",
             "\(homeDir)/.config/clash/config.yml",
@@ -603,7 +936,7 @@ public class NetworkTools: ObservableObject {
             return ClashConfigResult(
                 filePath: "未找到配置文件",
                 exists: false,
-                missingRules: ["未在 ~/.config/clash/ 或 ~/Library/Application Support/clash/ 找到 config.yaml"],
+                missingRules: ["未找到 Clash Verge / ClashX 的当前生效配置文件"],
                 recommendedSnippet: ClashConfigAdvisorView.recommendedYamlSnippet
             )
         }
@@ -634,86 +967,7 @@ public class NetworkTools: ObservableObject {
 
     /// 后台静默健康扫描（供菜单栏 10 分钟定时巡检，不触发 UI 遮罩）
     public func backgroundHealthCheck() async -> DiagnosisResult {
-        var result = DiagnosisResult()
-        
-        // 1. Clash / Mihomo 进程
-        if let out = try? await executeCommand("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' || true"),
-           !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result.clashRunning = true
-        }
-        
-        // 2. utun 虚拟网卡
-        if let out = try? await executeCommand("ifconfig | grep -c '^utun' 2>/dev/null || echo '0'"),
-           let count = Int(out.trimmingCharacters(in: .whitespacesAndNewlines)), count > 0 {
-            result.utunCount = count
-        }
-        
-        // 3. 代理状态
-        if let http = try? await executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null"),
-           let https = try? await executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null"),
-           let socks = try? await executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null"),
-           http.contains("Enabled: Yes") || https.contains("Enabled: Yes") || socks.contains("Enabled: Yes") {
-            result.proxyActive = true
-        }
-        
-        // 4. Fake-IP DNS
-        if let dns = try? await executeCommand("scutil --dns | grep 'nameserver\\[' | head -3 | awk '{print $3}'") {
-            let list = dns.components(separatedBy: .newlines).filter { !$0.isEmpty }
-            if list.contains(where: { $0.hasPrefix("198.18.") || $0.hasPrefix("198.19.") }) {
-                result.dnsAbnormal = true
-            }
-        }
-        
-        // 5. Wi-Fi 是否获取到 IP
-        if let ip = try? await executeCommand("ipconfig getifaddr en0 2>/dev/null || true"),
-           ip.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result.wifiNoIP = true
-        }
-        
-        // 6. 实际连通性快检（巡检同样检测，避免"配置正常但外网不通"漏报）
-        let (extOK, intOK) = await quickConnectivityCheck()
-        result.externalOK = extOK
-        result.internalOK = intOK
-        result.connectivityChecked = true
-        
-        let residualUtun = result.utunCount > 0 && !result.clashRunning
-        let configIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
-        let clashExternalFailure = result.clashRunning && !extOK
-        let pureNetworkSideIssue = !result.clashRunning && !extOK && !configIssues
-        
-        result.hasIssues = configIssues || clashExternalFailure || pureNetworkSideIssue
-        
-        if configIssues {
-            if result.wifiNoIP && result.clashRunning {
-                result.recommendedFix = "TUN 专用修复"
-                result.description = "Wi-Fi 未获取到 IP，疑似 Clash TUN 占用"
-            } else if result.wifiNoIP {
-                result.recommendedFix = "Wi-Fi 重置"
-                result.description = "Wi-Fi 未获取到 IP 地址"
-            } else if residualUtun {
-                result.recommendedFix = "深度清理"
-                result.description = "检测到 utun 接口残留"
-            } else if result.proxyActive || result.dnsAbnormal {
-                result.recommendedFix = "快速修复"
-                result.description = "代理或 DNS 配置异常"
-            } else {
-                result.recommendedFix = "快速修复"
-                result.description = "检测到潜在网络问题"
-            }
-        } else if clashExternalFailure {
-            result.recommendedFix = "TUN 专用修复"
-            result.description = intOK
-                ? "国内正常但代理外网不通，疑似 Clash 节点失效或 TUN 路由脱轨"
-                : "内外网均不通，疑似 Clash TUN 虚拟路由冲突"
-        } else if pureNetworkSideIssue {
-            result.recommendedFix = "网络侧检查"
-            result.description = intOK
-                ? "网络配置正常但外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商）"
-                : "网络配置正常但内外网均不通，疑似网络已断开或网络侧故障"
-        } else {
-            result.description = (result.clashRunning && result.utunCount > 0) ? "Clash TUN 运行正常，网络健康" : "网络状态正常"
-        }
-        return result
+        await collectDiagnosis(writeLogs: false)
     }
     
     // MARK: - VPN Purity Detection (VPN/IP 纯净度检测)
@@ -959,7 +1213,7 @@ public class NetworkTools: ObservableObject {
         public init() {
             targets = [
                 TargetResult(name: "Google", url: "https://www.google.com", kind: .external),
-                TargetResult(name: "OpenAI", url: "https://chatgpt.com", kind: .external),
+                TargetResult(name: "OpenAI", url: "https://api.openai.com/v1/models", kind: .external),
                 TargetResult(name: "GitHub", url: "https://github.com", kind: .external),
                 TargetResult(name: "百度", url: "https://www.baidu.com", kind: .internal),
                 TargetResult(name: "阿里 DNS", url: "https://223.5.5.5/dns-query", kind: .internal),
@@ -1012,7 +1266,7 @@ public class NetworkTools: ObservableObject {
                             t.httpCode = "无法连通"
                         }
                     } else {
-                        let cmd = "curl -o /dev/null -s -L -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' -m 6 -w '%{http_code}|%{time_total}' '\(target.url)'"
+                        let cmd = "/usr/bin/curl -o /dev/null -sS -L --connect-timeout 3 -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' -m 6 -w '%{http_code}|%{time_total}' '\(target.url)'"
                         if let out = try? await self.executeCommand(cmd) {
                             let parts = out.components(separatedBy: "|")
                             let code = parts.first ?? ""
@@ -1035,12 +1289,18 @@ public class NetworkTools: ObservableObject {
             }
         }
         
-        result.externalOK = result.targets.filter { $0.kind == .external }.contains { $0.ok }
-        result.internalOK = result.targets.filter { $0.kind == .internal }.contains { $0.ok }
+        let externalTargets = result.targets.filter { $0.kind == .external }
+        let internalTargets = result.targets.filter { $0.kind == .internal }
+        let externalSuccessCount = externalTargets.filter(\.ok).count
+        let internalSuccessCount = internalTargets.filter(\.ok).count
+        result.externalOK = !externalTargets.isEmpty && externalSuccessCount == externalTargets.count
+        result.internalOK = internalSuccessCount > 0
         result.checked = true
         
         if result.externalOK && result.internalOK {
             result.conclusion = "网络全部正常（内外网均通）"
+        } else if externalSuccessCount > 0 && result.internalOK {
+            result.conclusion = "部分海外服务失败 → Clash 节点或分流策略不稳定"
         } else if !result.externalOK && result.internalOK {
             result.conclusion = "外网不通、内网正常 → 大概率是 Clash/代理问题"
         } else if result.externalOK && !result.internalOK {
@@ -1054,9 +1314,9 @@ public class NetworkTools: ObservableObject {
             addLog("\(mark) [\(t.kind.rawValue)] \(t.name) \(t.url) \(t.httpCode) \(t.latencyMs)ms", level: t.ok ? .info : .warning)
         }
         addLog("🧪 连通性结论：\(result.conclusion)", level: result.externalOK && result.internalOK ? .success : .warning)
-        
+        let finalResult = result
         await MainActor.run {
-            self.connectivity = result
+            self.connectivity = finalResult
             self.isCheckingConnectivity = false
         }
     }
@@ -1101,27 +1361,42 @@ public class NetworkTools: ObservableObject {
         await MainActor.run {
             self.isRepairing = true
             self.progressMessage = "正在切换 DNS..."
+            self.lastOperationSuccess = nil
         }
         addLog("🔄 切换 DNS → \(preset.rawValue)...", level: .info)
-        
-        if let servers = preset.servers {
-            do {
+
+        var commandSucceeded = false
+        do {
+            if let servers = preset.servers {
                 _ = try await executeCommand("networksetup -setdnsservers Wi-Fi \(servers)")
-                addLog("✅ DNS 已切换为 \(servers)", level: .success)
-            } catch {
-                addLog("❌ DNS 切换失败：\(error.localizedDescription)", level: .error)
-            }
-        } else {
-            do {
+            } else {
                 _ = try await executeCommand("networksetup -setdnsservers Wi-Fi Empty")
-                addLog("✅ DNS 已恢复为自动获取 (DHCP)", level: .success)
-            } catch {
-                addLog("❌ DNS 恢复失败：\(error.localizedDescription)", level: .error)
             }
+            commandSucceeded = true
+        } catch {
+            addLog("❌ DNS 切换命令失败：\(error.localizedDescription)", level: .error)
         }
-        
+
+        let current = ((try? await executeCommand("networksetup -getdnsservers Wi-Fi 2>/dev/null")) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let verified: Bool
+        if let servers = preset.servers {
+            verified = commandSucceeded && current.components(separatedBy: .newlines).contains(servers)
+        } else {
+            verified = commandSucceeded && (current.isEmpty || current.localizedCaseInsensitiveContains("aren't any DNS"))
+        }
+
         await MainActor.run {
             self.isRepairing = false
+            self.lastOperationSuccess = verified
+            if verified {
+                self.addLog(
+                    preset.servers == nil ? "✅ DNS 已恢复为自动获取 (DHCP) 并校验成功" : "✅ DNS 已切换为 \(preset.servers ?? "") 并校验成功",
+                    level: .success
+                )
+            } else {
+                self.addLog("❌ DNS 切换后读取结果不一致，未报告为成功（当前：\(current.isEmpty ? "未知" : current)）", level: .error)
+            }
         }
         StatusMonitor.shared.refresh()
     }

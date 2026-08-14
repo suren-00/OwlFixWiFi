@@ -21,10 +21,10 @@ public struct MenuBarPopoverView: View {
                     .foregroundColor(manager.autoRepairEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3) : Color.gray)
                 
                 VStack(alignment: .leading, spacing: 1) {
-                    Text("自动自愈修复")
+                    Text("安全自动修复")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Color(red: 0.11, green: 0.11, blue: 0.12))
-                    Text(manager.autoRepairEnabled ? "检测到代理/DNS/IP异常时先自动修复" : "已关闭，仅在异常时发通知提醒")
+                    Text(manager.autoRepairEnabled ? "仅自动清理已失效的代理/DNS残留" : "已关闭，仅在异常时发通知提醒")
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundColor(Color.gray)
                 }
@@ -213,15 +213,15 @@ public struct MenuBarPopoverView: View {
             HStack(spacing: 8) {
                 compactCell(icon: "network", title: "IP 地址",
                             value: s.ipAddress,
-                            good: s.ipAddress != "未连接")
+                            good: s.hasUsableIPAddress)
                 compactCell(icon: "shield.lefthalf.filled", title: "Clash·TUN",
-                            value: s.clashRunning ? "运行中·\(s.utunCount) utun" : "未运行",
-                            good: s.clashRunning && s.utunCount > 0)
+                            value: s.clashRunning ? (s.clashTunEnabled ? "核心与TUN正常" : "核心运行·TUN关闭") : "未运行",
+                            good: s.clashRunning && s.clashTunEnabled)
             }
             HStack(spacing: 8) {
                 compactCell(icon: "arrow.left.arrow.right", title: "代理",
-                            value: s.isProxyActive ? "开启中" : "已关闭",
-                            good: !s.isProxyActive)
+                            value: s.proxyDisplayString,
+                            good: s.isProxyHealthy)
                 compactCell(icon: "list.bullet", title: "DNS",
                             value: s.dnsDisplayString,
                             good: !s.dnsDisplayString.contains("Fake"))

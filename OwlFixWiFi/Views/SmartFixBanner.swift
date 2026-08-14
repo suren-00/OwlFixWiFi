@@ -65,8 +65,11 @@ public struct SmartFixBanner: View {
                 Button(action: {
                     Task {
                         isSmartFixing = true
-                        diagnosisResult = await tools.diagnoseNetwork()
-                        await tools.smartFix()
+                        if diagnosisResult?.hasIssues == true {
+                            await tools.smartFix()
+                        } else {
+                            diagnosisResult = await tools.diagnoseNetwork()
+                        }
                         isSmartFixing = false
                     }
                 }) {
@@ -105,7 +108,7 @@ public struct SmartFixBanner: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(MenuBarManager.shared.autoRepairEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3) : Color.gray)
                 
-                Text("异常自动自愈修复：\(MenuBarManager.shared.autoRepairEnabled ? "已开启（巡检发现异常先自动修复）" : "已关闭（仅提示通知）")")
+                Text("安全自动修复：\(MenuBarManager.shared.autoRepairEnabled ? "已开启（仅清理已失效的代理/DNS残留）" : "已关闭（仅提示通知）")")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Color.secondary)
                 

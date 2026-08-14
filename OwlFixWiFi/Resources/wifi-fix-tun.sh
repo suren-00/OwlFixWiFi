@@ -1,284 +1,192 @@
 #!/bin/bash
 
-# =====================================================
-# Clash TUN 模式 WiFi 自动修复脚本
-# 解决 Clash TUN 模式导致的 WiFi 连接问题
-# =====================================================
+# OwlFixWiFi 安全命令行辅助工具
+# 自动模式只清理由“本地端口已经失效”确认的代理残留，不会关闭正在工作的 Clash。
 
-set -e
+set -u
 
-# 颜色定义
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# 日志函数
-log_info() {
-    echo -e "${BLUE}[ℹ️]${NC} $1"
-}
+log_info() { echo -e "${BLUE}[ℹ️]${NC} $1"; }
+log_success() { echo -e "${GREEN}[✅]${NC} $1"; }
+log_warning() { echo -e "${YELLOW}[⚠️]${NC} $1"; }
+log_error() { echo -e "${RED}[❌]${NC} $1"; }
 
-log_success() {
-    echo -e "${GREEN}[✅]${NC} $1"
-}
-
-log_warning() {
-    echo -e "${YELLOW}[⚠️]${NC} $1"
-}
-
-log_error() {
-    echo -e "${RED}[❌]${NC} $1"
-}
-
-# 显示使用帮助
 show_help() {
+    echo "OwlFixWiFi 安全网络检查工具"
     echo ""
-    echo "========================================="
-    echo "Clash TUN 模式 WiFi 修复工具"
-    echo "========================================="
-    echo ""
-    echo "用法：./wifi-fix-tun.sh [选项]"
-    echo ""
-    echo "选项:"
-    echo "  --full              完整修复（关闭 Clash + 重置网络）"
-    echo "  --quick             快速修复（仅重置 DNS 和代理）"
-    echo "  --check             检查当前网络状态"
-    echo "  --tun-status        检查 Clash TUN 状态"
-    echo "  --help              显示此帮助信息"
-    echo ""
-    echo "示例:"
-    echo "  ./wifi-fix-tun.sh          # 运行快速修复"
-    echo "  ./wifi-fix-tun.sh --full   # 执行完整修复流程"
-    echo "  ./wifi-fix-tun.sh --check  # 只检查状态不修复"
-    echo ""
-    echo "提示：部分操作需要管理员权限"
-    echo ""
+    echo "用法：./wifi-fix-tun.sh [--check|--quick|--tun-status|--full|--help]"
+    echo "  --check       只检查 Wi-Fi、Clash、TUN、代理与 DNS"
+    echo "  --quick       仅清理已确认失效的本地代理/Fake-IP DNS 残留"
+    echo "  --tun-status  检查 Mihomo 核心与 Clash 专属 TUN 路由"
+    echo "  --full        打开 OwlFixWiFi；深度修复必须在应用中手动授权"
 }
 
-# 检查当前网络状态
-check_network_status() {
-    log_info "正在检查网络状态..."
-    echo ""
-    
-    # 检查 WiFi 状态
-    echo "📡 WiFi 状态："
-    local wifi_enabled=$(networksetup -getnetworkserviceenabled Wi-Fi 2>/dev/null | tail -1)
-    if [[ "$wifi_enabled" == *"Enabled"* ]]; then
-        log_success "WiFi 服务已启用"
-    else
-        log_error "WiFi 服务已禁用"
+clash_core_running() {
+    if [[ -S /tmp/verge/verge-mihomo.sock ]] && \
+       /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 2 http://localhost/version >/dev/null 2>&1; then
+        return 0
     fi
-    
-    # 获取 IP 地址
-    local ip_addr=$(ipconfig getifaddr en0 2>/dev/null)
-    if [[ -n "$ip_addr" ]]; then
-        log_success "当前 IP: $ip_addr"
-    else
-        log_warning "未获取到 IP 地址"
-    fi
-    
-    # 检查 WiFi 连接的网关
-    local gateway=$(route get default 2>/dev/null | grep interface | awk '{print $2}')
-    if [[ -n "$gateway" && "$gateway" != "interface" ]]; then
-        log_success "网关地址：$gateway"
-    else
-        log_info "未找到有效网关"
-    fi
-    
-    # 检查 DNS
-    echo ""
-    echo "🌐 DNS 配置："
-    local dns_servers=$(scutil --dns 2>/dev/null | grep "nameserver\[" | head -3 | awk '{print $2}' | tr '\n' ', ')
-    if [[ -n "$dns_servers" ]]; then
-        log_info "DNS 服务器：$dns_servers"
-    else
-        log_warning "DNS 配置异常"
-    fi
-    
-    # 检查代理设置
-    echo ""
-    echo "🔗 代理状态："
-    local http_proxy=$(networksetup -getwebproxystate Wi-Fi 2>/dev/null | tail -1)
-    local https_proxy=$(networksetup -getsecurewebproxystate Wi-Fi 2>/dev/null | tail -1)
-    local socks_proxy=$(networksetup -getsocksfirewallproxystate Wi-Fi 2>/dev/null | tail -1)
-    
-    if [[ "$http_proxy" == "Disabled" ]]; then
-        log_success "HTTP 代理：已关闭"
-    else
-        log_error "HTTP 代理：开启中"
-    fi
-    
-    if [[ "$https_proxy" == "Disabled" ]]; then
-        log_success "HTTPS 代理：已关闭"
-    else
-        log_error "HTTPS 代理：开启中"
-    fi
-    
-    if [[ "$socks_proxy" == "Disabled" ]]; then
-        log_success "SOCKS 代理：已关闭"
-    else
-        log_error "SOCKS 代理：开启中"
-    fi
-    
-    # 检查 Clash 进程
-    echo ""
-    echo "🦈 Clash 状态："
-    if ps aux | grep -v "grep" | grep -q -i "clash"; then
-        log_info "Clash 正在运行"
-        
-        # 检查 TUN 模式
-        if ps aux | grep -v "grep" | grep -q -i "clash.*--tun\|clash.*-t"; then
-            log_warning "Clash TUN 模式已启用"
-        else
-            log_info "Clash TUN 模式可能未启用"
-        fi
-        
-        # 检查端口监听
-        if lsof -i :7890 &>/dev/null; then
-            log_success "Clash HTTP 端口 (7890) 正在监听"
-        else
-            log_warning "Clash HTTP 端口 (7890) 未监听"
-        fi
-        
-        if lsof -i :7891 &>/dev/null; then
-            log_success "Clash SOCKS 端口 (7891) 正在监听"
-        else
-            log_warning "Clash SOCKS 端口 (7891) 未监听"
-        fi
-        
-        # 检查虚拟网卡
-        local tun_count=$(ifconfig | grep -c "^utun")
-        if [[ $tun_count -gt 0 ]]; then
-            log_info "发现 $tun_count 个 Clash 虚拟网卡 (utun)"
-        fi
-    else
-        log_info "Clash 未运行"
-    fi
-    
-    echo ""
+
+    local name
+    for name in verge-mihomo mihomo clash-meta clash-premium sing-box; do
+        if /usr/bin/pgrep -x "$name" >/dev/null 2>&1; then return 0; fi
+    done
+    return 1
 }
 
-# 检查 Clash TUN 状态
-check_tun_status() {
-    log_info "检查 Clash TUN 状态..."
-    echo ""
-    
-    if ! ps aux | grep -v "grep" | grep -q -i "clash"; then
-        log_info "Clash 未运行"
+proxy_output() {
+    case "$1" in
+        HTTP) networksetup -getwebproxy Wi-Fi 2>/dev/null ;;
+        HTTPS) networksetup -getsecurewebproxy Wi-Fi 2>/dev/null ;;
+        SOCKS) networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null ;;
+    esac
+}
+
+proxy_enabled() {
+    proxy_output "$1" | awk -F': ' '$1 == "Enabled" {print $2; exit}' | grep -q '^Yes$'
+}
+
+proxy_endpoint() {
+    proxy_output "$1" | awk -F': ' '$1 == "Server" {server=$2} $1 == "Port" {port=$2} END {print server ":" port}'
+}
+
+disable_proxy() {
+    case "$1" in
+        HTTP) networksetup -setwebproxystate Wi-Fi off ;;
+        HTTPS) networksetup -setsecurewebproxystate Wi-Fi off ;;
+        SOCKS) networksetup -setsocksfirewallproxystate Wi-Fi off ;;
+    esac
+}
+
+check_proxy() {
+    local kind="$1"
+    if ! proxy_enabled "$kind"; then
+        log_info "$kind 代理：已关闭"
         return
     fi
-    
-    log_info "Clash 正在运行"
-    
-    echo ""
-    echo "Clash 命令行参数:"
-    ps aux | grep -i "clash" | grep -v "grep" | awk '{print $11, $12, $13, $14}'
-    
-    echo ""
-    echo "Clash 虚拟网卡:"
-    ifconfig | grep -A 5 "^utun" | grep -E "^utun|^ether|^inet " || log_info "未发现 utun 网卡"
-    
-    echo ""
-    echo "Clash 相关路由:"
-    netstat -rn | grep -E "utun|198\.18|192\.168\.31|10\.0\.0" || log_info "无特殊 Clash 路由"
-    
-    echo ""
-    echo "Clash 监听端口:"
-    lsof -i :7890,7891,9090 2>/dev/null || log_info "未检测到 Clash 标准端口"
-    
-    echo ""
-}
 
-# 快速修复
-quick_fix() {
-    log_info "开始执行快速修复..."
-    echo ""
-    
-    log_info "步骤 1/4: 关闭 Web 代理..."
-    networksetup -setwebproxystate Wi-Fi off 2>/dev/null || true
-    
-    log_info "步骤 2/4: 关闭安全 Web 代理..."
-    networksetup -setsecurewebproxystate Wi-Fi off 2>/dev/null || true
-    
-    log_info "步骤 3/4: 关闭 SOCKS 代理..."
-    networksetup -setsocksfirewallproxystate Wi-Fi off 2>/dev/null || true
-    
-    log_info "步骤 4/4: 重置 DNS 为自动获取..."
-    networksetup -setdnsservices Wi-Fi DHCP 2>/dev/null || true
-    
-    log_success "快速修复完成！"
-    echo ""
-}
-
-# 完整修复
-full_fix() {
-    log_info "开始执行完整修复流程..."
-    echo ""
-    
-    log_info "步骤 1/6: 安全终止 Clash 进程（避免暴力杀导致损坏）..."
-    pkill -f "clash.*--tun\|clash.*-t" 2>/dev/null || true
-    sleep 1
-    if ps aux | grep -v "grep" | grep -q -i "clash"; then
-        log_warning "检测到 Clash 进程仍在运行，执行强制终止..."
-        pkill -9 -i clash 2>/dev/null || true
-        sleep 1
+    local endpoint host port
+    endpoint=$(proxy_endpoint "$kind")
+    host=${endpoint%:*}
+    port=${endpoint##*:}
+    if [[ "$host" == "127.0.0.1" || "$host" == "localhost" || "$host" == "::1" ]]; then
+        if /usr/bin/nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1; then
+            log_success "$kind 代理：$endpoint 正常监听（有效配置）"
+        else
+            log_warning "$kind 代理：$endpoint 未监听（失效残留）"
+        fi
     else
-        log_success "Clash 进程已安全终止"
+        log_info "${kind} 代理：${endpoint}（手动/单位代理，不自动修改）"
     fi
-    
-    log_info "步骤 2/6: 强制释放 utun 虚拟网卡接口（关键！防止 Clash TUN 残留冲突）..."
-    sudo ifconfig utun* down 2>/dev/null || true
-    
-    log_info "步骤 3/6: 清除代理服务器地址配置..."
-    networksetup -setwebproxieserver Wi-Fi "" 2>/dev/null || true
-    networksetup -setsecurewebproxieserver Wi-Fi "" 2>/dev/null || true
-    networksetup -setsocksfirewallproxieserver Wi-Fi "" 2>/dev/null || true
-    
-    log_info "步骤 4/6: 刷新 DNS 缓存..."
-    sudo dscacheutil -flushcache 2>/dev/null || true
-    sudo killall -HUP mDNSResponder 2>/dev/null || true
-    
-    log_info "步骤 5/6: 确认 WiFi 服务已启用..."
-    networksetup -setnetworkserviceenabled Wi-Fi on 2>/dev/null || true
-    
-    log_info "步骤 6/6: 清理冲突路由规则..."
-    sudo route -n delete -host 198.18.0.0/16 default 2>/dev/null || true
-    sudo route -n delete -net 10.0.0.0/8 default 2>/dev/null || true
-    sudo route -n delete -net 172.16.0.0/12 default 2>/dev/null || true
-    
-    log_success "完整修复完成！Clash 进程和 utun 接口已彻底清理"
-    echo ""
 }
 
-# 主程序
+check_network_status() {
+    log_info "检查 Wi-Fi、Clash 与代理链路"
+    local ip gateway dns
+    ip=$(ipconfig getifaddr en0 2>/dev/null || true)
+    gateway=$(route -n get default 2>/dev/null | awk '/gateway:/{print $2; exit}')
+    dns=$(networksetup -getdnsservers Wi-Fi 2>/dev/null | tr '\n' ' ')
+
+    if [[ -z "$ip" ]]; then
+        log_error "Wi-Fi 未获取到 IP"
+    elif [[ "$ip" == 169.254.* ]]; then
+        log_error "Wi-Fi 仅取得自分配 IP：${ip}（DHCP 失败）"
+    else
+        log_success "Wi-Fi IP：${ip}；网关：${gateway:-未知}"
+    fi
+    log_info "Wi-Fi DNS：${dns:-自动获取}"
+
+    check_proxy HTTP
+    check_proxy HTTPS
+    check_proxy SOCKS
+
+    if clash_core_running; then
+        log_success "Mihomo 核心可响应"
+    else
+        log_warning "Mihomo 核心未运行或控制接口无响应"
+    fi
+
+    if route -n get 198.18.0.1 2>/dev/null | grep -q 'interface: utun'; then
+        log_success "Clash Fake-IP TUN 路由已启用"
+    else
+        log_info "未检测到 Clash Fake-IP TUN 路由"
+    fi
+}
+
+repair_proxy_if_residual() {
+    local kind="$1"
+    if ! proxy_enabled "$kind"; then return 0; fi
+
+    local endpoint host port
+    endpoint=$(proxy_endpoint "$kind")
+    host=${endpoint%:*}
+    port=${endpoint##*:}
+
+    if [[ "$host" != "127.0.0.1" && "$host" != "localhost" && "$host" != "::1" ]]; then
+        log_warning "${kind} 为手动/单位代理 ${endpoint}，已保护不修改"
+        return 0
+    fi
+    if /usr/bin/nc -z -w 1 127.0.0.1 "$port" >/dev/null 2>&1; then
+        log_success "$kind 代理 $endpoint 正常工作，已保留"
+        return 0
+    fi
+
+    if disable_proxy "$kind" >/dev/null 2>&1 && ! proxy_enabled "$kind"; then
+        log_success "已关闭失效的 $kind 代理 $endpoint"
+        return 0
+    fi
+    log_error "$kind 代理关闭失败"
+    return 1
+}
+
+quick_fix() {
+    log_info "执行安全快速修复"
+    local failed=0
+    repair_proxy_if_residual HTTP || failed=1
+    repair_proxy_if_residual HTTPS || failed=1
+    repair_proxy_if_residual SOCKS || failed=1
+
+    local dns
+    dns=$(networksetup -getdnsservers Wi-Fi 2>/dev/null || true)
+    if [[ "$dns" == *"198.18."* || "$dns" == *"198.19."* ]]; then
+        if clash_core_running; then
+            log_success "Fake-IP DNS 正由 Clash 使用，已保留"
+        elif networksetup -setdnsservers Wi-Fi Empty >/dev/null 2>&1; then
+            log_success "已清除 Clash 停止后的 Fake-IP DNS 残留"
+        else
+            log_error "Fake-IP DNS 清理失败"
+            failed=1
+        fi
+    else
+        log_info "未发现 Fake-IP DNS 残留"
+    fi
+
+    if [[ $failed -eq 0 ]]; then
+        log_success "快速修复完成并通过校验"
+    else
+        log_error "快速修复未完全成功"
+        return 1
+    fi
+}
+
+open_full_fix() {
+    log_warning "深度/TUN 修复会操作 root 权限的 Mihomo 与系统网络服务，不能在脚本中静默冒充成功。"
+    log_info "已尝试后台打开 OwlFixWiFi，请在应用中手动选择对应修复并完成一次系统授权。"
+    open -g -a OwlFixWiFi >/dev/null 2>&1 || true
+}
+
 main() {
     case "${1:-}" in
-        --help|-h)
-            show_help
-            exit 0
-            ;;
-        --check)
-            check_network_status
-            ;;
-        --tun-status)
-            check_tun_status
-            ;;
-        --full)
-            full_fix
-            ;;
-        --quick|"")
-            quick_fix
-            echo ""
-            log_success "已执行快速修复"
-            echo ""
-            check_network_status
-            ;;
-        *)
-            log_error "未知选项：$1"
-            show_help
-            exit 1
-            ;;
+        --help|-h) show_help ;;
+        --check|--tun-status) check_network_status ;;
+        --full) open_full_fix ;;
+        --quick|"") quick_fix; check_network_status ;;
+        *) log_error "未知选项：$1"; show_help; return 1 ;;
     esac
 }
 

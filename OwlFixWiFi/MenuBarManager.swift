@@ -240,30 +240,16 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
                 NetworkTools.shared.addLog("⚠️ 出口 IP 检测失败且外网不通，疑似网络侧问题", level: .warning)
             }
             
-            // 自动自愈修复：开启时遇到异常先自动执行自愈修复
+            // 自动自愈只处理“已确认失效的本地代理 / Clash 停止后的 Fake-IP DNS 残留”。
+            // 节点、TUN、Wi-Fi/DHCP 与网络侧问题只通知，由用户手动确认，避免后台断网或误杀 Clash。
             if final.hasIssues && self.autoRepairEnabled {
                 if NetworkTools.shared.isRepairing {
                     NetworkTools.shared.addLog("ℹ️ 检测到网络异常，但当前正在手动修复中，跳过自动修复", level: .info)
-                } else if canAutoFix() {
-                    var repaired = false
-                    if final.recommendedFix == "快速修复" {
+                } else if final.recommendedFix == "快速修复" {
+                    if canAutoFix() {
                         dlog("autoFix: 自动执行快速修复")
-                        NetworkTools.shared.addLog("🤖 [自动修复] 巡检发现代理/DNS 异常，正在自动自愈...", level: .warning)
+                        NetworkTools.shared.addLog("🤖 [自动修复] 发现已失效的代理/DNS 残留，正在安全清理...", level: .warning)
                         await NetworkTools.shared.quickFix()
-                        repaired = true
-                    } else if final.recommendedFix == "Wi-Fi 重置" {
-                        dlog("autoFix: 自动执行 Wi-Fi 重置")
-                        NetworkTools.shared.addLog("🤖 [自动修复] 巡检发现 Wi-Fi 拿不到 IP，正在自动重置 Wi-Fi 并重新请求 DHCP...", level: .warning)
-                        await NetworkTools.shared.wifiReset()
-                        repaired = true
-                    } else if final.recommendedFix == "TUN 专用修复" {
-                        dlog("autoFix: 尝试安全快速自愈")
-                        NetworkTools.shared.addLog("🤖 [自动修复] 检测到 TUN/代理异常，正在自动重置代理与清理 Fake-IP DNS...", level: .warning)
-                        await NetworkTools.shared.quickFix()
-                        repaired = true
-                    }
-                    
-                    if repaired {
                         markAutoFix()
                         try? await Task.sleep(nanoseconds: 1_500_000_000)
                         let recheck = await NetworkTools.shared.backgroundHealthCheck()
@@ -276,9 +262,11 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
                         self.apply(result: recheck)
                         self.isScanning = false
                         return
+                    } else {
+                        NetworkTools.shared.addLog("ℹ️ 已确认代理/DNS 残留，但 30 分钟内处理过一次；本次只提醒", level: .info)
                     }
                 } else {
-                    NetworkTools.shared.addLog("ℹ️ 检测到异常，30 分钟内已自动自愈过，本次跳过（可手动一键修复）", level: .info)
+                    NetworkTools.shared.addLog("🔔 [需手动确认] \(final.description)，建议执行【\(final.recommendedFix)】", level: .warning)
                 }
             }
             

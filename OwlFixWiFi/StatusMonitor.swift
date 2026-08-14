@@ -99,18 +99,25 @@ public class StatusMonitor: ObservableObject {
                 newStatus.utunCount = Int(trimmed) ?? 0
             }
             
-            // 7. Clash / Mihomo process & TUN
-            if let clashOut = try? await self.exec("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' 2>/dev/null") {
-                let isRunning = !clashOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                newStatus.clashRunning = isRunning
-                // 兼容命令行 --tun/-t 参数以及 Clash Verge/Mihomo 常驻 TUN 模式（运行且存在 utun 接口）
-                newStatus.clashTunEnabled = isRunning && (clashOut.contains("--tun") || clashOut.contains("-t") || newStatus.utunCount > 0)
+            // 7. Clash / Mihomo 核心与 TUN。只看到 Clash GUI/特权服务不算核心运行；
+            //    也不能把系统中其他 VPN 的任意 utun 当成 Clash TUN。
+            let apiCommand = "test -S /tmp/verge/verge-mihomo.sock && /usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 2 http://localhost/version >/dev/null"
+            let processCommand = "for name in verge-mihomo mihomo clash-meta clash-premium sing-box; do /usr/bin/pgrep -x \"$name\" >/dev/null && exit 0; done; exit 1"
+            let apiRunning = (try? await self.exec(apiCommand)) != nil
+            let processRunning = apiRunning ? false : ((try? await self.exec(processCommand)) != nil)
+            newStatus.clashRunning = apiRunning || processRunning
+
+            if let config = try? await self.exec("/usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 2 http://localhost/configs"),
+               config.contains("\"tun\":{\"enable\":true") {
+                newStatus.clashTunEnabled = true
+            } else {
+                newStatus.clashTunEnabled = (try? await self.exec("route -n get 198.18.0.1 2>/dev/null | grep -q 'interface: utun'")) != nil
             }
-            
-            // 8. Listening ports (7890/7891 standard Clash, 7897 Clash Verge, 9090/9097 API)
+
+            // 8. Listening ports。macOS 26 下普通用户 lsof 看不到 root Mihomo，改用 TCP 实连。
             var ports: [Int] = []
-            for port in [7890, 7891, 7897, 9090, 9097] {
-                if let lsofOut = try? await self.exec("lsof -i :\(port) 2>/dev/null"), !lsofOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            for port in [7890, 7891, 7892, 7897, 9090, 9097] {
+                if (try? await self.exec("/usr/bin/nc -z -w 1 127.0.0.1 \(port)")) != nil {
                     ports.append(port)
                 }
             }
@@ -135,7 +142,15 @@ public class StatusMonitor: ObservableObject {
             try process.run()
             process.waitUntilExit()
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            return String(data: data, encoding: .utf8) ?? ""
+            let output = String(data: data, encoding: .utf8) ?? ""
+            if process.terminationStatus != 0 {
+                throw NSError(
+                    domain: "StatusMonitor",
+                    code: Int(process.terminationStatus),
+                    userInfo: [NSLocalizedDescriptionKey: output]
+                )
+            }
+            return output
         }.value
     }
 }

@@ -6,14 +6,18 @@
 
 **OwlFix WiFi** 是一款专为 macOS 用户开发的原生图形化网络修复工具。针对在日常使用 **Clash / Clash Verge / ClashX (TUN 模式)** 过程中，因代理重定向残留、DNS 劫持、`utun` 虚拟网卡堆积导致的 **Wi-Fi 连通性异常** 提供一键式可视化修复方案。
 
+当前版本：**v1.6.2**
+
 ---
 
 ## 🎯 功能特点
 
-- **⚡ 一键快速修复**: 3 秒内自动关闭残余 HTTP/HTTPS/SOCKS 代理并重置 DNS 服务为 DHCP。
-- **🔧 深度清理模式**: 自动触发系统安全鉴权，刷新系统 DNS 缓存 (`dscacheutil`) 并重启 `mDNSResponder`。
-- **🦈 Clash TUN 专用修复**: 针对 Fake-IP (`198.18.0.0/16`) 路由表冲突与 `utun` 虚拟网卡重定向进行定向清理。
-- **📊 实时网络监控**: 每 5 秒自动感知当前 IP 地址、DNS 服务器列表、代理状态及 Clash 监听端口。
+- **⚡ 安全快速修复**：只清理“本地端口已失效”的 HTTP/HTTPS/SOCKS 代理与 Clash 停止后的 Fake-IP DNS；正在工作的 Clash 配置会被保留。
+- **🤖 10 分钟安全巡检**：自动模式仅执行上述安全快速修复；节点、TUN、Wi-Fi/DHCP 与网络侧问题只通知，不在后台断网重置。
+- **🧭 OpenAI/Codex 节点重测**：分别检测通用海外规则和 OpenAI 专用规则，发现间歇超时后可重新测速 URLTest 策略组。
+- **🔧 深度清理模式**：用户主动执行时仅弹出一次系统鉴权，刷新 DNS、重置 Wi-Fi/DHCP 并重建 Mihomo 核心，完成后再次校验结果。
+- **🦈 Clash TUN 专用修复**：只处理 Clash 的 Fake-IP TUN，不再批量关闭系统中其他 VPN 的 `utun`。
+- **📊 实时网络监控**：每 5 秒感知 IP、DNS、代理、Mihomo 核心、Clash TUN 与实际监听端口；有效代理显示为正常工作状态。
 - **⚙️ Clash 规则智能建议**: 校验本地 `config.yaml` 配置文件，提示并一键复制局域网直连 (`DIRECT`) YAML 规则。
 - **🖥️ 实时日志控制台**: 可视化分类控制台，支持实时滚动显示、一键复制与清空。
 
@@ -54,13 +58,13 @@ open build/Build/Products/Debug/OwlFixWiFi.app
    - 运行 OwlFix WiFi，应用自动读取本机 `en0` Wi-Fi 接口的网络配置与状态。
 2. **查看网络监控面板**
    - **IP 地址**: 检查是否正常分配到 IPv4 地址。
-   - **代理状态**: 若显示橙色“代理重定向生效中”，说明代理设置仍被占用。
-   - **Clash 状态**: 查看 `utun` 网卡数量及 `7890`/`7891` 监听端口。
+   - **代理状态**：显示“Clash 使用中”表示本地端口正常；只有“代理端口失效”才属于残留异常。
+   - **Clash 状态**：分别查看 Mihomo 核心和 Clash 专属 TUN，不把其他 VPN 的 `utun` 误判为 Clash。
 3. **选择修复模式**
-   - **快速修复 ⚡**: Wi-Fi 突发连不上或代理无法关闭时首选，3 秒完成。
-   - **深度清理 🔧**: 需输入 macOS 系统密码，彻底清除系统 DNS 缓存与路由残留。
-   - **TUN 专用 🦈**: 解决 Clash TUN 关闭后无法上网的典型症状。
-   - **检查诊断 📊**: 一键测试 Google DNS (8.8.8.8) 及本地解析连通性。
+   - **快速修复 ⚡**：清理已确认失效的代理/DNS 残留，不会关闭正常 Clash。
+   - **深度清理 🔧**：手动执行并完成一次 macOS 系统授权，重置物理网络和 Clash 核心。
+   - **TUN 专用 🦈**：只重建 Clash TUN；不删除其他 VPN 虚拟网卡。
+   - **检查诊断 📊**：分别检测 Google、GitHub、OpenAI、国内网络和本地网关。
 4. **查看日志**
    - 底部控制台展示详细每一步命令运行日志，遇到问题可点击“复制日志”反馈。
 
@@ -68,7 +72,7 @@ open build/Build/Products/Debug/OwlFixWiFi.app
 
 ## ⚙️ 高级配置与 Clash 规则优化
 
-若您的 Clash TUN 模式经常导致局域网连不上，请确保您的 Clash 配置文件 (`~/.config/clash/config.yaml`) 中的 `rules` 分组包含以下直连规则：
+若您的 Clash TUN 模式经常导致局域网连不上，请确保当前生效配置（Clash Verge 通常为 `~/Library/Application Support/io.github.clash-verge-rev.clash-verge-rev/clash-verge.yaml`）的 `rules` 分组包含以下直连规则：
 
 ```yaml
 rules:
@@ -89,10 +93,10 @@ rules:
 ## ❓ 常见问题排查 (Troubleshooting)
 
 #### 问题 1：深度清理模式提示需要输入管理员密码？
-- **解答**: 刷新 macOS 系统 DNS 缓存 (`dscacheutil`) 和重启 mDNS 服务属于系统级操作，OwlFix WiFi 遵循 macOS 原生 AppleScript 安全机制，弹出系统鉴权框。应用**绝不保存**您的密码。
+- **解答**：这是正常且必要的。终止 root 权限的 Mihomo、重启 mDNS 和系统网络服务不能由普通 App 静默完成。自动巡检和快速修复不会弹窗；只有用户主动选择 TUN/深度修复时请求一次授权，应用**绝不保存**密码。
 
 #### 问题 2：快速修复后 Wi-Fi 依然提示无互联网连接？
-- **解答**: 请点击“深度清理”模式，或在系统设置 -> Wi-Fi 中点击“忽略此网络”后重新输入密码连接。
+- **解答**：若 IP 为 `169.254.x.x`，说明路由器 DHCP 没有分配地址，需关闭该网络的“专用无线局域网地址”，并检查光猫 DHCP 租约/设备限制。若国内正常但 OpenAI 失败，先执行“Clash 节点重测”，不要反复清理 Wi-Fi。
 
 #### 问题 3：编译时提示权限不足？
 - **解答**: 请确保 `Resources/wifi-fix-tun.sh` 具有可执行权限（`chmod +x OwlFixWiFi/OwlFixWiFi/Resources/wifi-fix-tun.sh`）。

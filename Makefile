@@ -3,7 +3,8 @@
 PROJECT_NAME = OwlFixWiFi
 SCHEME = OwlFixWiFi
 BUILD_DIR = build
-DMG_NAME = OwlFixWiFi-v1.1.0.dmg
+VERSION = $(shell /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" OwlFixWiFi/Info.plist)
+DMG_NAME = OwlFixWiFi-v$(VERSION).dmg
 
 build:
 	@echo "🛠️ 正在编译 Debug 版本 $(PROJECT_NAME)..."
@@ -15,7 +16,6 @@ release:
 
 dmg: release
 	@echo "📦 正在生成 DMG 安装包 $(DMG_NAME)..."
-	rm -f $(DMG_NAME)
 	hdiutil create -volname "OwlFix WiFi" -srcfolder $(BUILD_DIR)/Build/Products/Release/$(PROJECT_NAME).app -ov -format UDZO $(DMG_NAME)
 
 install: release
@@ -35,4 +35,3 @@ clean:
 archive:
 	@echo "📦 打包 $(PROJECT_NAME)..."
 	xcodebuild -project $(PROJECT_NAME).xcodeproj -scheme $(SCHEME) -configuration Release -derivedDataPath $(BUILD_DIR) archive
-

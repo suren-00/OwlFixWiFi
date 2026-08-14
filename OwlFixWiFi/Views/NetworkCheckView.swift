@@ -49,7 +49,7 @@ public struct NetworkCheckView: View {
             
             if tools.connectivity.checked {
                 // 结论横幅
-                let (ok, color, icon) = conclusionAppearance
+                let (_, color, icon) = conclusionAppearance
                 HStack(spacing: 10) {
                     Image(systemName: icon)
                         .font(.system(size: 18, weight: .bold))

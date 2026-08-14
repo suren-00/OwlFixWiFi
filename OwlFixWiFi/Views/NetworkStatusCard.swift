@@ -25,14 +25,14 @@ public struct NetworkStatusCard: View {
                 // Active proxy state warning indicator
                 if status.isProxyActive {
                     HStack(spacing: 4) {
-                        Circle().fill(Color.orange).frame(width: 7, height: 7)
-                        Text("代理重定向生效中")
+                        Circle().fill(status.isProxyHealthy ? Color.green : Color.orange).frame(width: 7, height: 7)
+                        Text(status.proxyDisplayString)
                             .font(.system(size: 11, weight: .semibold))
-                            .foregroundColor(Color.orange)
+                            .foregroundColor(status.isProxyHealthy ? Color(red: 0.1, green: 0.65, blue: 0.3) : Color.orange)
                     }
                     .padding(.horizontal, 9)
                     .padding(.vertical, 4)
-                    .background(Capsule().fill(Color.orange.opacity(0.12)))
+                    .background(Capsule().fill((status.isProxyHealthy ? Color.green : Color.orange).opacity(0.12)))
                 } else {
                     HStack(spacing: 4) {
                         Circle().fill(Color.green).frame(width: 7, height: 7)
@@ -96,10 +96,10 @@ public struct NetworkStatusCard: View {
                 // Proxy States
                 HStack(spacing: 10) {
                     ZStack {
-                        Circle().fill(status.isProxyActive ? Color.orange.opacity(0.12) : Color.green.opacity(0.12))
+                        Circle().fill((status.isProxyHealthy ? Color.green : Color.orange).opacity(0.12))
                             .frame(width: 30, height: 30)
                         Image(systemName: "lock.shield")
-                            .foregroundColor(status.isProxyActive ? .orange : Color(red: 0.1, green: 0.65, blue: 0.3))
+                            .foregroundColor(status.isProxyHealthy ? Color(red: 0.1, green: 0.65, blue: 0.3) : .orange)
                             .font(.system(size: 14, weight: .semibold))
                     }
                     
@@ -109,9 +109,9 @@ public struct NetworkStatusCard: View {
                             .foregroundColor(Color(red: 0.5, green: 0.5, blue: 0.52))
                         
                         HStack(spacing: 6) {
-                            ProxyBadgeLight(title: "HTTP", enabled: status.httpProxy.isEnabled)
-                            ProxyBadgeLight(title: "HTTPS", enabled: status.httpsProxy.isEnabled)
-                            ProxyBadgeLight(title: "SOCKS", enabled: status.socksProxy.isEnabled)
+                            ProxyBadgeLight(title: "HTTP", enabled: status.httpProxy.isEnabled, healthy: status.isProxyHealthy)
+                            ProxyBadgeLight(title: "HTTPS", enabled: status.httpsProxy.isEnabled, healthy: status.isProxyHealthy)
+                            ProxyBadgeLight(title: "SOCKS", enabled: status.socksProxy.isEnabled, healthy: status.isProxyHealthy)
                         }
                     }
                     Spacer()
@@ -138,12 +138,12 @@ public struct NetworkStatusCard: View {
                                 .foregroundColor(status.clashRunning ? Color(red: 0.1, green: 0.65, blue: 0.3) : .gray)
                             
                             if status.utunCount > 0 {
-                                Text("\(status.utunCount) utun")
+                                Text(status.clashTunEnabled ? "TUN 已启用" : "\(status.utunCount) utun")
                                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(Capsule().fill(Color.orange.opacity(0.15)))
-                                    .foregroundColor(.orange)
+                                    .background(Capsule().fill((status.clashTunEnabled ? Color.green : Color.orange).opacity(0.15)))
+                                    .foregroundColor(status.clashTunEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3) : .orange)
                             }
                         }
                     }
@@ -167,6 +167,7 @@ public struct NetworkStatusCard: View {
 struct ProxyBadgeLight: View {
     let title: String
     let enabled: Bool
+    let healthy: Bool
     
     var body: some View {
         HStack(spacing: 2) {
@@ -177,7 +178,7 @@ struct ProxyBadgeLight: View {
         }
         .padding(.horizontal, 6)
         .padding(.vertical, 2)
-        .background(Capsule().fill(enabled ? Color.orange.opacity(0.15) : Color.green.opacity(0.12)))
-        .foregroundColor(enabled ? Color.orange : Color(red: 0.1, green: 0.6, blue: 0.25))
+        .background(Capsule().fill(enabled ? (healthy ? Color.cyan.opacity(0.15) : Color.orange.opacity(0.15)) : Color.green.opacity(0.12)))
+        .foregroundColor(enabled ? (healthy ? Color.cyan : Color.orange) : Color(red: 0.1, green: 0.6, blue: 0.25))
     }
 }

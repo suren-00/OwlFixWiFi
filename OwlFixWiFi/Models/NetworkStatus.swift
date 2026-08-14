@@ -34,6 +34,22 @@ public struct NetworkStatus: Equatable {
     public var isProxyActive: Bool {
         return httpProxy == .enabled || httpsProxy == .enabled || socksProxy == .enabled
     }
+
+    /// 系统代理开启并不等于异常；只要本地 Clash 核心和代理端口都在响应，就是正常工作状态。
+    public var isProxyHealthy: Bool {
+        guard isProxyActive else { return true }
+        let mixedProxyPorts: Set<Int> = [7890, 7891, 7892, 7897]
+        return clashRunning && !mixedProxyPorts.isDisjoint(with: Set(clashPortsListening))
+    }
+
+    public var proxyDisplayString: String {
+        if !isProxyActive { return clashTunEnabled ? "TUN 接管中" : "已关闭" }
+        return isProxyHealthy ? "Clash 使用中" : "代理端口失效"
+    }
+
+    public var hasUsableIPAddress: Bool {
+        ipAddress != "未连接" && !ipAddress.hasPrefix("169.254.")
+    }
     
     public var dnsDisplayString: String {
         if dnsServers.isEmpty {
