@@ -108,7 +108,7 @@ public struct SmartFixBanner: View {
                     .font(.system(size: 12, weight: .bold))
                     .foregroundColor(MenuBarManager.shared.autoRepairEnabled ? Color(red: 0.1, green: 0.65, blue: 0.3) : Color.gray)
                 
-                Text("安全自动修复：\(MenuBarManager.shared.autoRepairEnabled ? "已开启（仅清理已失效的代理/DNS残留）" : "已关闭（仅提示通知）")")
+                Text("安全自动修复：\(MenuBarManager.shared.autoRepairEnabled ? "已开启（代理/DNS + Clash安全重连）" : "已关闭（仅提示通知）")")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(Color.secondary)
                 

@@ -149,6 +149,13 @@ public class NetworkTools: ObservableObject {
         }
     }
 
+    /// 后台安全自愈的执行结果。只有 attempted 表示实际改动过 TUN/动态组状态。
+    public enum SafeAutoRecoveryOutcome {
+        case skipped
+        case recoveredWithoutChanges
+        case attempted
+    }
+
     /// 单目标 HTTP 探测：curl 拿到 http_code 即连通（000=失败/超时）
     private func probeHTTP(_ url: String, timeout: Int) async -> Bool {
         let connectTimeout = min(3, timeout)
@@ -663,6 +670,115 @@ public class NetworkTools: ObservableObject {
         }
     }
 
+    /// 后台安全自愈：只处理“Clash 核心与 TUN 均正常存在，但关键链路持续失败”。
+    /// 严格禁止在此流程中重启 Wi-Fi、更新 DHCP、杀进程、申请管理员权限或清理其他 utun。
+    public func safeAutoRecoverClash(from diagnosis: DiagnosisResult) async -> SafeAutoRecoveryOutcome {
+        let broadFailure = !diagnosis.generalExternalOK && !diagnosis.openAIOK
+        let codexOnlyFailure = diagnosis.generalExternalOK && !diagnosis.openAIOK
+        guard diagnosis.recommendedFix == "Clash 节点重测",
+              diagnosis.clashRunning,
+              diagnosis.clashTunActive,
+              !diagnosis.wifiNoIP,
+              broadFailure || codexOnlyFailure else {
+            if diagnosis.recommendedFix == "Clash 节点重测" {
+                addLog("ℹ️ [自动修复] 仅检测到单次抖动或单一普通站点异常，本轮不修改网络", level: .info)
+            }
+            return .skipped
+        }
+
+        let alreadyBusy = await MainActor.run { self.isRepairing || self.isDiagnosing }
+        guard !alreadyBusy else { return .skipped }
+
+        // 单位/手动远程代理、已失效代理均不属于本流程，避免覆盖用户网络策略。
+        let proxy = await assessSystemProxy(clashRunning: true)
+        guard !proxy.isManualRemoteProxy, !proxy.isResidual else {
+            addLog("🔒 [自动修复] 检测到需保护的代理状态，未自动重载 Clash", level: .warning)
+            return .skipped
+        }
+
+        // 等待一秒后二次探测，瞬时抖动已自行恢复时不做任何网络改动。
+        try? await Task.sleep(nanoseconds: 1_000_000_000)
+        let confirmation = await quickConnectivityCheck()
+        if confirmation.generalExternalOK && confirmation.openAIOK {
+            addLog("✅ [自动修复] 二次确认时链路已自行恢复，未修改任何网络配置", level: .success)
+            return .recoveredWithoutChanges
+        }
+        let confirmedBroadFailure = !confirmation.generalExternalOK && !confirmation.openAIOK
+        let confirmedCodexOnlyFailure = confirmation.generalExternalOK && !confirmation.openAIOK
+        guard confirmedBroadFailure || confirmedCodexOnlyFailure else {
+            addLog("🔒 [自动修复] 二次结果不符合安全修复模型，本轮不修改网络", level: .warning)
+            return .skipped
+        }
+
+        // 动作前再次验证控制接口与 TUN，防止使用十分钟前的过期诊断结果。
+        guard await detectClashCoreRunning(), await detectClashTunActive() else {
+            addLog("🔒 [自动修复] Clash/TUN 状态已变化，本轮取消自动操作", level: .warning)
+            return .skipped
+        }
+        let becameBusy = await MainActor.run { self.isRepairing || self.isDiagnosing }
+        guard !becameBusy else {
+            addLog("🔒 [自动修复] 用户已开始手动操作，本轮自动修复立即让路", level: .info)
+            return .skipped
+        }
+
+        await MainActor.run {
+            self.isRepairing = true
+            self.progressMessage = "正在执行安全自动修复..."
+            self.lastOperationSuccess = nil
+        }
+
+        var recovered = false
+        var attempted = false
+        var mayRetestDynamicGroup = confirmedCodexOnlyFailure
+
+        // 只有通用外网与 OpenAI 同时失败，才判断为 TUN/物理出口整体脱轨并重建 TUN。
+        // 仅 OpenAI 失败时跳过 TUN，直接进入专用动态组健康重测。
+        if confirmedBroadFailure {
+            attempted = true
+            addLog("🤖 [自动修复] 全链路故障已二次确认，轻量重建 Clash TUN（不重启 Wi-Fi/Clash）...", level: .warning)
+            if await reloadClashTunChannel() {
+                mayRetestDynamicGroup = true
+                let afterTun = await quickConnectivityCheck()
+                recovered = afterTun.generalExternalOK && afterTun.openAIOK
+            } else {
+                addLog("❌ [自动修复] TUN 重建未通过状态校验，已尝试恢复原开启状态", level: .error)
+            }
+        } else {
+            addLog("🤖 [自动修复] 仅 Codex/OpenAI 链路持续失败，保留 TUN，仅重测专用动态组...", level: .warning)
+        }
+
+        // TUN 重建后仍失败，或仅 Codex 链路失败时，只允许现有动态组重测。
+        // Selector/手动节点不在后台自动修改，留给用户确认。
+        if !recovered, mayRetestDynamicGroup, let snapshot = await clashProxySnapshot() {
+            let target = snapshot.healthGroup.isEmpty ? snapshot.group : snapshot.healthGroup
+            if await triggerDynamicClashHealthCheck(named: target) {
+                attempted = true
+                let afterHealthCheck = await quickConnectivityCheck()
+                recovered = afterHealthCheck.generalExternalOK && afterHealthCheck.openAIOK
+                let selected = (await clashProxySnapshot())?.node ?? snapshot.node
+                if selected != snapshot.node {
+                    addLog("🔄 [自动修复] 动态组已从 \(snapshot.node) 切换为 \(selected)", level: .success)
+                }
+            } else {
+                addLog("🔒 [自动修复] 当前为手动策略组，未在后台改选节点", level: .warning)
+            }
+        }
+
+        await MainActor.run {
+            self.isRepairing = false
+            self.lastOperationSuccess = recovered
+            self.addLog(
+                recovered
+                    ? "✅ [自动修复] Clash 链路已恢复并通过即时复检"
+                    : (attempted
+                        ? "⚠️ [自动修复] 安全步骤未能恢复网络，已停止继续修改，请手动检查节点/订阅"
+                        : "🔒 [自动修复] 没有符合安全条件的自动动作，网络配置保持不变"),
+                level: recovered ? .success : .warning
+            )
+        }
+        return attempted ? .attempted : .skipped
+    }
+
     /// 重新测试 OpenAI/Codex 策略组。URLTest 组会依据测速结果自动改选健康节点；不改订阅文件。
     public func refreshClashNodeHealth() async {
         await MainActor.run {
@@ -766,6 +882,19 @@ public class NetworkTools: ObservableObject {
         return automatic
     }
 
+    /// 自动模式只允许触发会自行选路的动态组，禁止后台修改 Selector 的手动选择。
+    private func triggerDynamicClashHealthCheck(named groupName: String) async -> Bool {
+        guard let info = await clashProxyInfo(named: groupName) else { return false }
+        let type = ((info["type"] as? String) ?? "").lowercased()
+        guard ["fallback", "urltest", "loadbalance"].contains(type) else { return false }
+
+        let encodedGroup = percentEncodedPathComponent(groupName)
+        let command = "/usr/bin/curl --unix-socket /tmp/verge/verge-mihomo.sock -fsS --max-time 15 'http://localhost/group/\(encodedGroup)/delay?url=https%3A%2F%2Fapi.openai.com%2Fv1%2Fmodels&timeout=5000' >/dev/null"
+        guard (try? await executeCommand(command)) != nil else { return false }
+        try? await Task.sleep(nanoseconds: 500_000_000)
+        return true
+    }
+
     /// 通过 Mihomo 本地 API 重建当前 TUN 通道，专门处理切换物理网络后的旧出口绑定。
     /// 失败时尽力恢复 TUN 开启状态，避免修复动作本身留下断网状态。
     private func reloadClashTunChannel() async -> Bool {
@@ -781,8 +910,10 @@ public class NetworkTools: ObservableObject {
             try? await Task.sleep(nanoseconds: 1_500_000_000)
             return await detectClashTunActive()
         } catch {
+            try? await Task.sleep(nanoseconds: 300_000_000)
             _ = try? await executeCommand(enable)
-            return false
+            try? await Task.sleep(nanoseconds: 800_000_000)
+            return await detectClashTunActive()
         }
     }
     

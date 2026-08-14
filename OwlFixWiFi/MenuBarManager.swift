@@ -240,8 +240,10 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
                 NetworkTools.shared.addLog("⚠️ 出口 IP 检测失败且外网不通，疑似网络侧问题", level: .warning)
             }
             
-            // 自动自愈只处理“已确认失效的本地代理 / Clash 停止后的 Fake-IP DNS 残留”。
-            // 节点、TUN、Wi-Fi/DHCP 与网络侧问题只通知，由用户手动确认，避免后台断网或误杀 Clash。
+            // 自动自愈范围：
+            // 1) 已确认失效的本地代理 / Clash 停止后的 Fake-IP DNS 残留；
+            // 2) 二次确认仍失败的 Clash 链路，只轻量重建 TUN 并触发动态组重测。
+            // Wi-Fi/DHCP、手动节点、深度清理、管理员操作与网络侧问题仍只提示。
             if final.hasIssues && self.autoRepairEnabled {
                 if NetworkTools.shared.isRepairing {
                     NetworkTools.shared.addLog("ℹ️ 检测到网络异常，但当前正在手动修复中，跳过自动修复", level: .info)
@@ -265,6 +267,35 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
                     } else {
                         NetworkTools.shared.addLog("ℹ️ 已确认代理/DNS 残留，但 30 分钟内处理过一次；本次只提醒", level: .info)
                     }
+                } else if final.recommendedFix == "Clash 节点重测" {
+                    if canAutoFix() {
+                        dlog("autoFix: 尝试安全恢复 Clash 链路")
+                        let outcome = await NetworkTools.shared.safeAutoRecoverClash(from: final)
+                        switch outcome {
+                        case .skipped:
+                            NetworkTools.shared.addLog("🔔 [需手动确认] 本轮不满足安全自动修复条件，建议执行【\(final.recommendedFix)】", level: .warning)
+                        case .recoveredWithoutChanges:
+                            let recheck = await NetworkTools.shared.backgroundHealthCheck()
+                            self.apply(result: recheck)
+                            self.isScanning = false
+                            return
+                        case .attempted:
+                            markAutoFix()
+                            try? await Task.sleep(nanoseconds: 1_500_000_000)
+                            let recheck = await NetworkTools.shared.backgroundHealthCheck()
+                            if recheck.hasIssues {
+                                NetworkTools.shared.addLog("⚠️ [自动修复] 复检仍异常：\(recheck.description)。已停止自动操作，等待手动处理", level: .warning)
+                            } else {
+                                NetworkTools.shared.addLog("✅ [自动修复] 最终复检通过，网络已恢复正常", level: .success)
+                                self.postAutoFixSuccessNotification(detail: final.description)
+                            }
+                            self.apply(result: recheck)
+                            self.isScanning = false
+                            return
+                        }
+                    } else {
+                        NetworkTools.shared.addLog("ℹ️ Clash 链路仍异常，但 30 分钟内已自动处理过；本轮只提醒，避免反复重连", level: .info)
+                    }
                 } else {
                     NetworkTools.shared.addLog("🔔 [需手动确认] \(final.description)，建议执行【\(final.recommendedFix)】", level: .warning)
                 }
@@ -275,7 +306,7 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
         }
     }
     
-    /// 自动修复节流判断
+    /// 所有后台网络改动共用一个节流窗口，避免不同异常类型交替触发反复修复。
     private func canAutoFix() -> Bool {
         guard let last = UserDefaults.standard.object(forKey: lastAutoFixKey) as? Date else { return true }
         return Date().timeIntervalSince(last) >= autoFixInterval

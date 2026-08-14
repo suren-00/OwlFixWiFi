@@ -24,7 +24,7 @@ public struct MenuBarPopoverView: View {
                     Text("安全自动修复")
                         .font(.system(size: 11, weight: .bold))
                         .foregroundColor(Color(red: 0.11, green: 0.11, blue: 0.12))
-                    Text(manager.autoRepairEnabled ? "仅自动清理已失效的代理/DNS残留" : "已关闭，仅在异常时发通知提醒")
+                    Text(manager.autoRepairEnabled ? "代理/DNS清理 + Clash安全重连" : "已关闭，仅在异常时发通知提醒")
                         .font(.system(size: 9.5, weight: .medium))
                         .foregroundColor(Color.gray)
                 }
