@@ -223,13 +223,16 @@ public class NetworkTools: ObservableObject {
         result.connectivityChecked = true
         addLog("🧪 连通性快检：外网\(extOK ? "✅通" : "❌不通") 内网\(intOK ? "✅通" : "❌不通")", level: extOK ? .info : .warning)
         
-        // 判断是否有问题（Clash 运行时存在 utun 虚拟网卡是 TUN 模式正常现象，不算异常；
-        // 只有 Clash 退出后的 utun 残留、代理残留、Fake-IP DNS 残留、Wi-Fi 无 IP 才算真正异常；
-        // 配置全部正常但外网不通 = 网络侧问题（认证/路由器/运营商），修复工具无法解决）
+        // 判断是否有问题：
+        // 1. Clash 退出后的 utun 残留、代理残留、Fake-IP DNS 残留、Wi-Fi 无 IP 属于明确配置异常；
+        // 2. Clash 运行中但外网不通（内网正常）属于 Clash 节点失效 / TUN DNS 脱轨，需推荐 TUN 修复；
+        // 3. 仅当 Clash 未运行且配置正常但外网仍不通时，才判定为真正的“网络侧问题”（WiFi 认证/路由器/运营商）。
         let residualUtun = result.utunCount > 0 && !result.clashRunning
         let configIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
-        let networkSideIssue = !extOK && !configIssues
-        result.hasIssues = configIssues || networkSideIssue
+        let clashExternalFailure = result.clashRunning && !extOK
+        let pureNetworkSideIssue = !result.clashRunning && !extOK && !configIssues
+        
+        result.hasIssues = configIssues || clashExternalFailure || pureNetworkSideIssue
         
         // 确定推荐修复方案
         if configIssues {
@@ -249,7 +252,12 @@ public class NetworkTools: ObservableObject {
                 result.recommendedFix = "快速修复"
                 result.description = "检测到潜在网络问题，建议全面检查"
             }
-        } else if networkSideIssue {
+        } else if clashExternalFailure {
+            result.recommendedFix = "TUN 专用修复"
+            result.description = intOK
+                ? "国内网络正常但外网不通，疑似 Clash 节点失效、TUN 脱轨或未开启系统代理"
+                : "内外网均不通，疑似 Clash TUN 虚拟路由冲突或节点断开"
+        } else if pureNetworkSideIssue {
             result.recommendedFix = "网络侧检查"
             result.description = intOK
                 ? "网络配置正常但外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商），修复工具无法解决"
@@ -718,8 +726,10 @@ public class NetworkTools: ObservableObject {
         
         let residualUtun = result.utunCount > 0 && !result.clashRunning
         let configIssues = residualUtun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
-        let networkSideIssue = !extOK && !configIssues
-        result.hasIssues = configIssues || networkSideIssue
+        let clashExternalFailure = result.clashRunning && !extOK
+        let pureNetworkSideIssue = !result.clashRunning && !extOK && !configIssues
+        
+        result.hasIssues = configIssues || clashExternalFailure || pureNetworkSideIssue
         
         if configIssues {
             if result.wifiNoIP && result.clashRunning {
@@ -738,7 +748,12 @@ public class NetworkTools: ObservableObject {
                 result.recommendedFix = "快速修复"
                 result.description = "检测到潜在网络问题"
             }
-        } else if networkSideIssue {
+        } else if clashExternalFailure {
+            result.recommendedFix = "TUN 专用修复"
+            result.description = intOK
+                ? "国内正常但代理外网不通，疑似 Clash 节点失效或 TUN 路由脱轨"
+                : "内外网均不通，疑似 Clash TUN 虚拟路由冲突"
+        } else if pureNetworkSideIssue {
             result.recommendedFix = "网络侧检查"
             result.description = intOK
                 ? "网络配置正常但外网不通，疑似网络侧问题（WiFi 认证 / 路由器 / 运营商）"
