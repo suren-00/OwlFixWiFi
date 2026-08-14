@@ -173,12 +173,12 @@ public class NetworkTools: ObservableObject {
         
         addLog("🧠 开始智能网络诊断...", level: .info)
         
-        // 1. 检查 Clash 进程
+        // 1. 检查 Clash / Mihomo 进程
         do {
-            let clashOut = try await executeCommand("ps aux | grep -v grep | grep -i clash || true")
+            let clashOut = try await executeCommand("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' || true")
             if !clashOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 result.clashRunning = true
-                addLog("检测到 Clash 进程在运行", level: .warning)
+                addLog("检测到代理核心进程 (Clash/Mihomo) 在运行", level: .warning)
             }
         } catch {}
         
@@ -472,13 +472,14 @@ public class NetworkTools: ObservableObject {
             self.lastOperationSuccess = nil
         }
         
-        addLog("📶 开始重置 Wi-Fi 网络服务...", level: .info)
+        addLog("📶 开始重置 Wi-Fi 网络服务并请求 DHCP...", level: .info)
         _ = try? await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi off")
         try? await Task.sleep(nanoseconds: 1_500_000_000)
         _ = try? await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi on")
         try? await Task.sleep(nanoseconds: 2_500_000_000)
         _ = try? await executeCommand("ipconfig set en0 DHCP 2>/dev/null || true")
-        addLog("✅ Wi-Fi 重置完成，等待获取 IP...", level: .success)
+        addLog("✅ Wi-Fi 重置完成，已重新发起 DHCP IP 请求", level: .success)
+        addLog("💡 提示：若重置后仍未分配到 IP，多为路由器 DHCP 地址池耗尽或开启了 MAC 轮换限制，建议：1) 重启无线路由器 2) 在系统 Wi-Fi 设置中关闭【专用无线局域网地址】", level: .info)
         
         await MainActor.run {
             self.isRepairing = false
@@ -576,11 +577,11 @@ public class NetworkTools: ObservableObject {
             addLog("🔗 [代理状态] HTTP: \(http.trimmingCharacters(in: .whitespacesAndNewlines)) | HTTPS: \(https.trimmingCharacters(in: .whitespacesAndNewlines)) | SOCKS: \(socks.trimmingCharacters(in: .whitespacesAndNewlines))", level: .info)
         } catch {}
         
-        // Clash Check
+        // Clash / Mihomo Check
         do {
-            let clashProc = try await executeCommand("ps aux | grep -v grep | grep -i clash || true")
+            let clashProc = try await executeCommand("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' || true")
             let isClashRunning = !clashProc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-            addLog("🦈 [Clash 状态] 进程运行：\(isClashRunning ? "YES" : "NO")", level: isClashRunning ? .warning : .info)
+            addLog("🦈 [Clash/Mihomo 状态] 进程运行：\(isClashRunning ? "YES" : "NO")", level: isClashRunning ? .warning : .info)
         } catch {}
         
         // utun Check
@@ -675,8 +676,8 @@ public class NetworkTools: ObservableObject {
     public func backgroundHealthCheck() async -> DiagnosisResult {
         var result = DiagnosisResult()
         
-        // 1. Clash 进程
-        if let out = try? await executeCommand("ps aux | grep -v grep | grep -i clash || true"),
+        // 1. Clash / Mihomo 进程
+        if let out = try? await executeCommand("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' || true"),
            !out.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result.clashRunning = true
         }
@@ -991,16 +992,16 @@ public class NetworkTools: ObservableObject {
         public init() {
             targets = [
                 TargetResult(name: "Google", url: "https://www.google.com", kind: .external),
-                TargetResult(name: "OpenAI", url: "https://chat.openai.com", kind: .external),
+                TargetResult(name: "OpenAI", url: "https://chatgpt.com", kind: .external),
                 TargetResult(name: "GitHub", url: "https://github.com", kind: .external),
                 TargetResult(name: "百度", url: "https://www.baidu.com", kind: .internal),
-                TargetResult(name: "阿里 DNS", url: "https://223.5.5.5", kind: .internal),
-                TargetResult(name: "本地网关", url: "http://192.168.1.1", kind: .internal),
+                TargetResult(name: "阿里 DNS", url: "https://223.5.5.5/dns-query", kind: .internal),
+                TargetResult(name: "本地网关", url: "动态获取网关", kind: .internal),
             ]
         }
     }
     
-    /// 连通性分类检测：外网（Google/OpenAI/GitHub）+ 内网（百度/阿里DNS/网关）
+    /// 连通性分类检测：外网（Google/OpenAI/GitHub）+ 内网（百度/阿里DNS/本地网关）
     public func checkConnectivity() async {
         await MainActor.run {
             self.isCheckingConnectivity = true
@@ -1008,23 +1009,55 @@ public class NetworkTools: ObservableObject {
         }
         addLog("🧪 开始连通性检测（外网/内网分类）...", level: .info)
         
+        // 动态解析真实默认网关 IP
+        var gatewayIP = "192.168.1.1"
+        if let gwOut = try? await self.executeCommand("route -n get default 2>/dev/null | grep gateway | awk '{print $2}'") {
+            let trimmed = gwOut.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty {
+                gatewayIP = trimmed
+            }
+        }
+        
         var result = ConnectivityResult()
+        let activeGateway = gatewayIP
+        
         await withTaskGroup(of: (Int, TargetResult).self) { group in
             for (idx, target) in result.targets.enumerated() {
                 group.addTask {
                     var t = target
-                    let cmd = "curl -o /dev/null -s -m 6 -w '%{http_code}|%{time_total}' '\(target.url)'"
-                    if let out = try? await self.executeCommand(cmd) {
-                        let parts = out.components(separatedBy: "|")
-                        let code = parts.first ?? ""
-                        t.httpCode = code.isEmpty ? "超时" : code
-                        // curl 能返回 http_code 即代表 TCP/TLS 连通（000=连接失败/超时）
-                        t.ok = !code.isEmpty && code != "000"
-                        if let sec = Double(parts.count > 1 ? parts[1] : "0") {
-                            t.latencyMs = Int(sec * 1000)
+                    if t.name == "本地网关" {
+                        t = TargetResult(name: "本地网关 (\(activeGateway))", url: "ping://\(activeGateway)", kind: .internal)
+                        let pingCmd = "ping -c 1 -W 1500 \(activeGateway) 2>/dev/null"
+                        if let pingOut = try? await self.executeCommand(pingCmd),
+                           pingOut.contains("1 packets received") || pingOut.contains("1 packets transmitted, 1 received") {
+                            t.ok = true
+                            t.httpCode = "PING OK"
+                            // 提取 rtt
+                            if let rttRange = pingOut.range(of: "min/avg/max/stddev = ") {
+                                let rttPart = String(pingOut[rttRange.upperBound...])
+                                let avgMs = rttPart.components(separatedBy: "/").dropFirst().first ?? "1"
+                                t.latencyMs = Int(Double(avgMs.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 1)
+                            } else {
+                                t.latencyMs = 1
+                            }
+                        } else {
+                            t.ok = false
+                            t.httpCode = "无法连通"
                         }
                     } else {
-                        t.httpCode = "失败"
+                        let cmd = "curl -o /dev/null -s -L -A 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7)' -m 6 -w '%{http_code}|%{time_total}' '\(target.url)'"
+                        if let out = try? await self.executeCommand(cmd) {
+                            let parts = out.components(separatedBy: "|")
+                            let code = parts.first ?? ""
+                            t.httpCode = code.isEmpty ? "超时" : code
+                            // curl 能返回 http_code 即代表 TCP/TLS 连通（000=连接失败/超时）
+                            t.ok = !code.isEmpty && code != "000"
+                            if let sec = Double(parts.count > 1 ? parts[1] : "0") {
+                                t.latencyMs = Int(sec * 1000)
+                            }
+                        } else {
+                            t.httpCode = "失败"
+                        }
                     }
                     t.checked = true
                     return (idx, t)
@@ -1051,7 +1084,7 @@ public class NetworkTools: ObservableObject {
         
         for t in result.targets {
             let mark = t.ok ? "✅" : "❌"
-            addLog("\(mark) [\(t.kind.rawValue)] \(t.name) \(t.url) HTTP \(t.httpCode) \(t.latencyMs)ms", level: t.ok ? .info : .warning)
+            addLog("\(mark) [\(t.kind.rawValue)] \(t.name) \(t.url) \(t.httpCode) \(t.latencyMs)ms", level: t.ok ? .info : .warning)
         }
         addLog("🧪 连通性结论：\(result.conclusion)", level: result.externalOK && result.internalOK ? .success : .warning)
         

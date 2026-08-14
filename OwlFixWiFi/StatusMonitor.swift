@@ -93,28 +93,26 @@ public class StatusMonitor: ObservableObject {
                 newStatus.socksProxy = socksOut.contains("Enabled: Yes") ? .enabled : .disabled
             }
             
-            // 6. Clash process & TUN
-            if let clashOut = try? await self.exec("ps aux | grep -v grep | grep -i clash 2>/dev/null") {
-                newStatus.clashRunning = !clashOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                newStatus.clashTunEnabled = clashOut.contains("--tun") || clashOut.contains("-t")
-            }
-            
-            // 7. utun Interfaces
+            // 6. utun Interfaces
             if let utunOut = try? await self.exec("ifconfig | grep -c '^utun' 2>/dev/null") {
                 let trimmed = utunOut.trimmingCharacters(in: .whitespacesAndNewlines)
                 newStatus.utunCount = Int(trimmed) ?? 0
             }
             
-            // 8. Listening ports
+            // 7. Clash / Mihomo process & TUN
+            if let clashOut = try? await self.exec("ps aux | grep -v grep | grep -iE 'clash|mihomo|sing-box' 2>/dev/null") {
+                let isRunning = !clashOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                newStatus.clashRunning = isRunning
+                // 兼容命令行 --tun/-t 参数以及 Clash Verge/Mihomo 常驻 TUN 模式（运行且存在 utun 接口）
+                newStatus.clashTunEnabled = isRunning && (clashOut.contains("--tun") || clashOut.contains("-t") || newStatus.utunCount > 0)
+            }
+            
+            // 8. Listening ports (7890/7891 standard Clash, 7897 Clash Verge, 9090/9097 API)
             var ports: [Int] = []
-            if let lsof7890 = try? await self.exec("lsof -i :7890 2>/dev/null"), !lsof7890.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ports.append(7890)
-            }
-            if let lsof7891 = try? await self.exec("lsof -i :7891 2>/dev/null"), !lsof7891.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ports.append(7891)
-            }
-            if let lsof9090 = try? await self.exec("lsof -i :9090 2>/dev/null"), !lsof9090.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                ports.append(9090)
+            for port in [7890, 7891, 7897, 9090, 9097] {
+                if let lsofOut = try? await self.exec("lsof -i :\(port) 2>/dev/null"), !lsofOut.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    ports.append(port)
+                }
             }
             newStatus.clashPortsListening = ports
             
