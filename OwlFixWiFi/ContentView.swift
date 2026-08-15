@@ -34,7 +34,7 @@ public struct ContentView: View {
     
     // 获取当前应用版本号
     private var appVersion: String {
-        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.6.6"
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.6.7"
     }
     
     public var body: some View {

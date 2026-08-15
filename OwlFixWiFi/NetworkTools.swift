@@ -173,6 +173,18 @@ public class NetworkTools: ObservableObject {
         }
         return false
     }
+
+    /// 不使用系统/开发环境代理的物理链路探测。用于判断当前 Wi-Fi/热点
+    /// 是否已经稳定，避免在 configd 正在切换默认接口时重建 Clash TUN。
+    private func probeDirectHTTP(_ url: String, timeout: Int) async -> Bool {
+        let connectTimeout = min(3, timeout)
+        let cmd = "/usr/bin/curl --noproxy '*' --ipv4 -L -o /dev/null -sS --connect-timeout \(connectTimeout) -m \(timeout) -w '%{http_code}' '\(url)'"
+        if let out = try? await executeCommand(cmd) {
+            let code = out.trimmingCharacters(in: .whitespacesAndNewlines)
+            return !code.isEmpty && code != "000"
+        }
+        return false
+    }
     
     /// 实际连通性快检：同时覆盖通用代理规则与 OpenAI 专用规则。
     /// OpenAI 连测两次，避免“Google/GitHub 正常但 Codex 节点间歇掉线”被误报为全网正常。
@@ -376,6 +388,36 @@ public class NetworkTools: ObservableObject {
     private func currentWiFiAddress() async -> String {
         let output = (try? await executeCommand("ipconfig getifaddr en0 2>/dev/null || true")) ?? ""
         return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func currentDefaultGateway() async -> String {
+        let output = (try? await executeCommand("route -n get default 2>/dev/null | awk '/gateway:/{print $2}'")) ?? ""
+        return output.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 至少连续两次确认 IP、默认网关、网关 DNS 端口和国内直连均正常且稳定。
+    /// 网络尚在从 Wi-Fi/热点切换时返回 false，后台只能等待下一轮巡检。
+    private func physicalNetworkIsStable() async -> Bool {
+        var previousFingerprint = ""
+        for attempt in 0..<2 {
+            let address = await currentWiFiAddress()
+            let gateway = await currentDefaultGateway()
+            guard !address.isEmpty, !address.hasPrefix("169.254."), !gateway.isEmpty else {
+                return false
+            }
+
+            let gatewayReachable = (try? await executeCommand("/usr/bin/nc -z -w 1 \(gateway) 53")) != nil
+            let domesticReachable = await probeDirectHTTP("https://www.baidu.com", timeout: 5)
+            guard gatewayReachable && domesticReachable else { return false }
+
+            let fingerprint = "\(address)|\(gateway)"
+            if attempt > 0 && fingerprint == previousFingerprint {
+                return true
+            }
+            previousFingerprint = fingerprint
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+        }
+        return false
     }
 
     private func clashProxyInfo(named name: String) async -> [String: Any]? {
@@ -658,6 +700,12 @@ public class NetworkTools: ObservableObject {
         case "Clash 节点重测":
             addLog("💡 检测到节点链路不稳定，重新测速并让策略组选择健康节点...", level: .info)
             await refreshClashNodeHealth()
+            let firstRepairSucceeded = await MainActor.run { self.lastOperationSuccess == true }
+            let broadFailure = !diagnosis.internalOK && !diagnosis.generalExternalOK && !diagnosis.openAIOK
+            if !firstRepairSucceeded && broadFailure {
+                addLog("💡 TUN/节点处理后内外网仍同时失败，重绑定当前网络位置并重新获取 DHCP（不创建新位置）...", level: .warning)
+                await rebindCurrentWiFiLocation()
+            }
 
         case "TUN 专用修复":
             addLog("💡 检测到 Clash TUN 问题，执行专项清理...", level: .info)
@@ -841,6 +889,18 @@ public class NetworkTools: ObservableObject {
             case .notNeeded, .skipped:
                 break
             }
+        }
+
+        // 热点/Wi-Fi 正在切换时，DIRECT 与 PROXY 会同时失败，但此时重建 TUN
+        // 反而可能把旧出口重新写回去。物理链路未连续稳定前，自动流程只等待。
+        let physicalPathStable = confirmedBroadFailure ? await physicalNetworkIsStable() : true
+        if confirmedBroadFailure && !physicalPathStable {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("⏸️ [自动修复] 检测到 Wi-Fi/热点仍在切换，暂不重建 TUN，等待下一轮稳定复检", level: .info)
+            }
+            return .skipped
         }
 
         // 只有通用外网与 OpenAI 同时失败，才判断为 TUN/物理出口整体脱轨并重建 TUN。
@@ -1103,6 +1163,66 @@ public class NetworkTools: ObservableObject {
                 self.isRepairing = false
                 self.lastOperationSuccess = false
                 self.addLog("❌ 深度清理中断：\(error.localizedDescription)", level: .error)
+            }
+        }
+    }
+
+    /// 手动一键修复的最后一道网络位置恢复：重载当前 Wi-Fi 服务、重新请求 DHCP，
+    /// 再同步 Clash 代理并重建 TUN。它模拟“新建位置”带来的 configd/路由重载，
+    /// 但不会创建、切换或留下新的“未命名”位置；后台自动巡检禁止调用此流程。
+    private func rebindCurrentWiFiLocation() async {
+        await MainActor.run {
+            self.isRepairing = true
+            self.progressMessage = "正在重绑定当前网络位置..."
+            self.lastOperationSuccess = nil
+        }
+
+        let clashWasRunning = await detectClashCoreRunning()
+        do {
+            addLog("🧭 重载当前 Wi-Fi 网络服务（不创建新位置、不修改其他 VPN）...", level: .info)
+            _ = try await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi off")
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            _ = try await executeCommand("networksetup -setnetworkserviceenabled Wi-Fi on")
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            _ = try await executeCommand("ipconfig set en0 DHCP")
+
+            var address = await currentWiFiAddress()
+            for _ in 0..<8 where address.isEmpty || address.hasPrefix("169.254.") {
+                try? await Task.sleep(nanoseconds: 1_000_000_000)
+                address = await currentWiFiAddress()
+            }
+            let usableIP = !address.isEmpty && !address.hasPrefix("169.254.")
+            guard usableIP else {
+                await MainActor.run {
+                    self.isRepairing = false
+                    self.lastOperationSuccess = false
+                    self.addLog("❌ 当前网络位置重绑定后仍未取得有效 IP，疑似 DHCP/路由器问题", level: .error)
+                }
+                return
+            }
+
+            _ = await syncClashSystemProxyIfNeeded()
+            if clashWasRunning {
+                addLog("🔄 网络服务已恢复，重新绑定 Clash TUN 出口并复检...", level: .info)
+                _ = await reloadClashTunChannel()
+            }
+
+            let links = await quickConnectivityCheck()
+            let verified = links.internalOK && (!clashWasRunning || (links.generalExternalOK && links.openAIOK))
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = verified
+                if verified {
+                    self.addLog("✅ 当前网络位置重绑定完成：内网、外网与 OpenAI 均已恢复", level: .success)
+                } else {
+                    self.addLog("❌ 当前网络位置已重绑定但实测仍失败：内网=\(links.internalOK ? "正常" : "不通")，外网/OpenAI=\(links.externalOK ? "正常" : "不通")", level: .error)
+                }
+            }
+        } catch {
+            await MainActor.run {
+                self.isRepairing = false
+                self.lastOperationSuccess = false
+                self.addLog("❌ 当前网络位置重绑定失败：\(error.localizedDescription)", level: .error)
             }
         }
     }

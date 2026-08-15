@@ -20,6 +20,7 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
     private let pathMonitor = NWPathMonitor()
     private let pathMonitorQueue = DispatchQueue(label: "com.owlfixwifi.path-monitor")
     private var hasReceivedInitialPath = false
+    private var lastNetworkPathSignature = ""
     private var networkChangeWork: DispatchWorkItem?
     private var lastNetworkChangeScan = Date.distantPast
     
@@ -120,6 +121,9 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
         pathMonitor.pathUpdateHandler = { [weak self] path in
             DispatchQueue.main.async {
                 guard let self else { return }
+                let signature = "\(path.status)|\(path.isExpensive)|\(path.isConstrained)|\(path.availableInterfaces.map { String(describing: $0.type) }.joined(separator: ","))"
+                guard signature != self.lastNetworkPathSignature else { return }
+                self.lastNetworkPathSignature = signature
                 if !self.hasReceivedInitialPath {
                     self.hasReceivedInitialPath = true
                     return
