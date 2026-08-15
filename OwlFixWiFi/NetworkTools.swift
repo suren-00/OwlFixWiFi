@@ -764,19 +764,21 @@ public class NetworkTools: ObservableObject {
             }
         }
 
+        let finalRecovered = recovered
+        let finalAttempted = attempted
         await MainActor.run {
             self.isRepairing = false
-            self.lastOperationSuccess = recovered
+            self.lastOperationSuccess = finalRecovered
             self.addLog(
-                recovered
+                finalRecovered
                     ? "✅ [自动修复] Clash 链路已恢复并通过即时复检"
-                    : (attempted
+                    : (finalAttempted
                         ? "⚠️ [自动修复] 安全步骤未能恢复网络，已停止继续修改，请手动检查节点/订阅"
                         : "🔒 [自动修复] 没有符合安全条件的自动动作，网络配置保持不变"),
-                level: recovered ? .success : .warning
+                level: finalRecovered ? .success : .warning
             )
         }
-        return attempted ? .attempted : .skipped
+        return finalAttempted ? .attempted : .skipped
     }
 
     /// 重新测试 OpenAI/Codex 策略组。URLTest 组会依据测速结果自动改选健康节点；不改订阅文件。
@@ -954,15 +956,18 @@ public class NetworkTools: ObservableObject {
             let usableIP = !address.isEmpty && !address.hasPrefix("169.254.")
             let detectedCore = await detectClashCoreRunning()
             let coreRecovered = !clashWasRunning || detectedCore
-            let verified = usableIP && coreRecovered
+            let links = usableIP && coreRecovered ? await quickConnectivityCheck() : QuickConnectivityResult()
+            let connectivityRecovered = links.internalOK
+                && (!clashWasRunning || (links.generalExternalOK && links.openAIOK))
+            let verified = usableIP && coreRecovered && connectivityRecovered
 
             await MainActor.run {
                 self.isRepairing = false
                 self.lastOperationSuccess = verified
                 if verified {
-                    self.addLog("✅ 深度清理校验通过：Wi-Fi 已取得 \(address)，Clash 状态已恢复", level: .success)
+                    self.addLog("✅ 深度清理校验通过：Wi-Fi 已取得 \(address)，国内与代理链路均已恢复", level: .success)
                 } else {
-                    self.addLog("❌ 深度清理后校验未通过：IP=\(address.isEmpty ? "未获取" : address)，Clash 核心=\(coreRecovered ? "正常" : "未恢复")", level: .error)
+                    self.addLog("❌ 深度清理后校验未通过：IP=\(address.isEmpty ? "未获取" : address)，Clash 核心=\(coreRecovered ? "正常" : "未恢复")，国内=\(links.internalOK ? "正常" : "不通")，外网/OpenAI=\(links.externalOK ? "正常" : "不通")", level: .error)
                 }
             }
         } catch {
@@ -995,13 +1000,17 @@ public class NetworkTools: ObservableObject {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 address = await currentWiFiAddress()
             }
-            let verified = !address.isEmpty && !address.hasPrefix("169.254.")
+            let hasUsableIP = !address.isEmpty && !address.hasPrefix("169.254.")
+            let links = hasUsableIP ? await quickConnectivityCheck() : QuickConnectivityResult()
+            let verified = hasUsableIP && links.internalOK
             let verifiedAddress = address
             await MainActor.run {
                 self.isRepairing = false
                 self.lastOperationSuccess = verified
                 if verified {
-                    self.addLog("✅ Wi-Fi 重置校验通过，已取得 IP：\(verifiedAddress)", level: .success)
+                    self.addLog("✅ Wi-Fi 重置校验通过，已取得 IP 且国内网络可用：\(verifiedAddress)", level: .success)
+                } else if hasUsableIP {
+                    self.addLog("❌ Wi-Fi 已取得 \(verifiedAddress)，但实际流量仍不通；这不是 DHCP 问题，请执行【Clash 节点重测】以重建 TUN", level: .error)
                 } else {
                     self.addLog("❌ Wi-Fi 重置后仍未取得有效 IP，属于 DHCP/路由器侧问题，不能报告为已修复", level: .error)
                 }
@@ -1050,17 +1059,22 @@ public class NetworkTools: ObservableObject {
                 coreRecovered = await detectClashCoreRunning()
             }
             let tunRecovered = await detectClashTunActive()
-            let verified = coreWasRunning ? (coreRecovered && tunRecovered) : !tunRecovered
-            let links = verified && coreRecovered ? await quickConnectivityCheck() : QuickConnectivityResult()
+            let routeRecovered = coreWasRunning ? (coreRecovered && tunRecovered) : !tunRecovered
+            let links = routeRecovered && coreRecovered ? await quickConnectivityCheck() : QuickConnectivityResult()
+            let connectivityRecovered = links.internalOK
+                && (!coreWasRunning || (links.generalExternalOK && links.openAIOK))
+            let verified = routeRecovered && (!coreWasRunning || connectivityRecovered)
 
             await MainActor.run {
                 self.isRepairing = false
                 self.lastOperationSuccess = verified
                 if verified {
-                    self.addLog("✅ TUN 修复校验通过：Mihomo 核心与 TUN 路由已重建", level: .success)
-                    if !links.openAIOK {
-                        self.addLog("⚠️ TUN 已恢复但 OpenAI 仍不通，根因是节点/订阅而不是虚拟网卡", level: .warning)
-                    }
+                    self.addLog(coreWasRunning
+                        ? "✅ TUN 修复校验通过：Mihomo、TUN、国内与 OpenAI 链路均已恢复"
+                        : "✅ TUN 残留已清除",
+                        level: .success)
+                } else if routeRecovered {
+                    self.addLog("❌ Mihomo 与 TUN 虽已重建，但实际流量仍未恢复（国内=\(links.internalOK ? "正常" : "不通")，外网/OpenAI=\(links.externalOK ? "正常" : "不通")），不能报告为修复成功", level: .error)
                 } else {
                     self.addLog("❌ TUN 修复后核心或路由未恢复，未冒充修复成功", level: .error)
                 }

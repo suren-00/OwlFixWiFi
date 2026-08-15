@@ -1,4 +1,5 @@
 import AppKit
+import Network
 import SwiftUI
 import UserNotifications
 
@@ -16,6 +17,11 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
     private var normalImage: NSImage?
     private var alertImage: NSImage?
     private var isScanning = false
+    private let pathMonitor = NWPathMonitor()
+    private let pathMonitorQueue = DispatchQueue(label: "com.owlfixwifi.path-monitor")
+    private var hasReceivedInitialPath = false
+    private var networkChangeWork: DispatchWorkItem?
+    private var lastNetworkChangeScan = Date.distantPast
     
     /// 自动扫描间隔：10 分钟
     private let scanInterval: TimeInterval = 600
@@ -104,6 +110,47 @@ public final class MenuBarManager: NSObject, ObservableObject, UNUserNotificatio
         scanTimer = Timer.scheduledTimer(withTimeInterval: scanInterval, repeats: true) { [weak self] _ in
             self?.scanNow()
         }
+
+        startNetworkChangeMonitoring()
+    }
+
+    /// 热点/Wi-Fi/有线网络切换后，Mihomo 偶尔继续使用旧物理出口。
+    /// 等系统路由稳定后再复检；实际修复仍受二次确认、30 分钟节流和安全动作白名单保护。
+    private func startNetworkChangeMonitoring() {
+        pathMonitor.pathUpdateHandler = { [weak self] path in
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if !self.hasReceivedInitialPath {
+                    self.hasReceivedInitialPath = true
+                    return
+                }
+
+                self.networkChangeWork?.cancel()
+                let work = DispatchWorkItem { [weak self] in
+                    self?.runNetworkChangeScanWhenReady()
+                }
+                self.networkChangeWork = work
+                DispatchQueue.main.asyncAfter(deadline: .now() + 8, execute: work)
+                self.dlog("network path changed: status=\(path.status) expensive=\(path.isExpensive)")
+            }
+        }
+        pathMonitor.start(queue: pathMonitorQueue)
+    }
+
+    private func runNetworkChangeScanWhenReady() {
+        guard Date().timeIntervalSince(lastNetworkChangeScan) >= 60 else { return }
+        guard !isScanning, !NetworkTools.shared.isRepairing else {
+            let work = DispatchWorkItem { [weak self] in
+                self?.runNetworkChangeScanWhenReady()
+            }
+            networkChangeWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5, execute: work)
+            return
+        }
+
+        lastNetworkChangeScan = Date()
+        NetworkTools.shared.addLog("🔄 检测到网络环境变化，等待路由稳定后自动复检", level: .info)
+        scanNow()
     }
     
     // MARK: - 悬停弹出面板
