@@ -123,11 +123,18 @@ public class NetworkTools: ObservableObject {
         let port: Int
     }
 
+    private enum ProxySyncOutcome {
+        case notNeeded
+        case restored
+        case skipped
+    }
+
     private struct ProxyAssessment {
         var configured = false
         var isExpected = false
         var isResidual = false
         var isManualRemoteProxy = false
+        var needsSync = false
         var summary = "未开启"
     }
 
@@ -203,12 +210,8 @@ public class NetworkTools: ObservableObject {
         return (try? await executeCommand("route -n get 198.18.0.1 2>/dev/null | grep -q 'interface: utun'")) != nil
     }
 
-    private func enabledProxyEndpoint(from output: String) -> ProxyEndpoint? {
+    private func proxyEndpoint(from output: String) -> ProxyEndpoint? {
         let lines = output.components(separatedBy: .newlines)
-        guard lines.contains(where: { $0.trimmingCharacters(in: .whitespaces) == "Enabled: Yes" }) else {
-            return nil
-        }
-
         let host = lines.first(where: { $0.hasPrefix("Server:") })?
             .replacingOccurrences(of: "Server:", with: "")
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -217,6 +220,13 @@ public class NetworkTools: ObservableObject {
             .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         guard !host.isEmpty, let port = Int(portText), (1...65535).contains(port) else { return nil }
         return ProxyEndpoint(host: host, port: port)
+    }
+
+    private func enabledProxyEndpoint(from output: String) -> ProxyEndpoint? {
+        guard output.components(separatedBy: .newlines).contains(where: {
+            $0.trimmingCharacters(in: .whitespaces) == "Enabled: Yes"
+        }) else { return nil }
+        return proxyEndpoint(from: output)
     }
 
     private func assessSystemProxy(clashRunning: Bool) async -> ProxyAssessment {
@@ -228,7 +238,21 @@ public class NetworkTools: ObservableObject {
             value.flatMap(enabledProxyEndpoint(from:))
         }
 
-        guard !endpoints.isEmpty else { return ProxyAssessment() }
+        guard !endpoints.isEmpty else {
+            let configuredEndpoints = [outputs.0, outputs.1, outputs.2].compactMap { value in
+                value.flatMap(proxyEndpoint(from:))
+            }
+            let expected = ProxyEndpoint(host: "127.0.0.1", port: 7897)
+            let needsSync = configuredEndpoints.count == 3 && configuredEndpoints.allSatisfy { $0 == expected }
+            return ProxyAssessment(
+                configured: false,
+                isExpected: false,
+                isResidual: false,
+                isManualRemoteProxy: false,
+                needsSync: needsSync,
+                summary: needsSync ? "当前网络位置已配置 Clash 7897，但代理开关处于关闭状态" : "未开启"
+            )
+        }
 
         let loopbackHosts: Set<String> = ["127.0.0.1", "localhost", "::1"]
         let localEndpoints = endpoints.filter { loopbackHosts.contains($0.host.lowercased()) }
@@ -266,6 +290,61 @@ public class NetworkTools: ObservableObject {
             isManualRemoteProxy: false,
             summary: "本地代理端口 \(ports) 未监听，属于失效残留"
         )
+    }
+
+    /// 网络位置是 macOS 独立保存的配置档案。用户切换/新建位置后，Clash
+    /// 仍然可以运行，但当前档案里的 HTTP/HTTPS/SOCKS 开关会全部变成关闭，
+    /// 造成“国内直连正常、海外代理失效”。只在 Mihomo 控制接口和 7897
+    /// 均确认可用、且三个代理字段仍指向本机 7897 时恢复开关，避免覆盖远程或单位代理。
+    private func syncClashSystemProxyIfNeeded() async -> ProxySyncOutcome {
+        guard await detectClashCoreRunning(),
+              (try? await executeCommand("/usr/bin/nc -z -w 1 127.0.0.1 7897")) != nil else {
+            return .skipped
+        }
+
+        async let http = try? executeCommand("networksetup -getwebproxy Wi-Fi 2>/dev/null")
+        async let https = try? executeCommand("networksetup -getsecurewebproxy Wi-Fi 2>/dev/null")
+        async let socks = try? executeCommand("networksetup -getsocksfirewallproxy Wi-Fi 2>/dev/null")
+        let outputs = await (http, https, socks)
+        let rawOutputs = [outputs.0, outputs.1, outputs.2]
+        let endpoints = rawOutputs.compactMap { value in value.flatMap(proxyEndpoint(from:)) }
+        let expected = ProxyEndpoint(host: "127.0.0.1", port: 7897)
+
+        // 只处理明确属于当前 Clash 的本地代理配置。字段缺失、远程地址或其他端口
+        // 一律保护，交给用户确认，避免误改公司代理、VPN 或其他本地代理软件。
+        guard endpoints.count == 3, endpoints.allSatisfy({ $0 == expected }) else {
+            addLog("🔒 当前网络位置的代理字段不是完整的 Clash 7897 配置，未自动覆盖", level: .warning)
+            return .skipped
+        }
+
+        let enabledCount = rawOutputs.compactMap { value in
+            value.flatMap(enabledProxyEndpoint(from:))
+        }.count
+        guard enabledCount < 3 else { return .notNeeded }
+
+        addLog("🔁 检测到当前网络位置关闭了 Clash 代理，正在同步 HTTP/HTTPS/SOCKS 到 127.0.0.1:7897", level: .warning)
+        let commands = [
+            "networksetup -setwebproxy Wi-Fi 127.0.0.1 7897",
+            "networksetup -setsecurewebproxy Wi-Fi 127.0.0.1 7897",
+            "networksetup -setsocksfirewallproxy Wi-Fi 127.0.0.1 7897",
+            "networksetup -setwebproxystate Wi-Fi on",
+            "networksetup -setsecurewebproxystate Wi-Fi on",
+            "networksetup -setsocksfirewallproxystate Wi-Fi on"
+        ]
+
+        do {
+            for command in commands { _ = try await executeCommand(command) }
+            let after = await assessSystemProxy(clashRunning: true)
+            guard after.isExpected, !after.isResidual else {
+                addLog("❌ 当前网络位置的 Clash 代理同步后校验失败，未继续修改其他网络配置", level: .error)
+                return .skipped
+            }
+            addLog("✅ 当前网络位置已重新绑定 Clash 代理端口 7897", level: .success)
+            return .restored
+        } catch {
+            addLog("❌ 同步当前网络位置代理失败：\(error.localizedDescription)", level: .error)
+            return .skipped
+        }
     }
 
     private func residualLocalProxyServices() async -> [(name: String, disableCommand: String)] {
@@ -386,6 +465,7 @@ public class NetworkTools: ObservableObject {
         public var proxyActive: Bool = false
         public var proxyConfigured: Bool = false
         public var proxyExpected: Bool = false
+        public var systemProxyNeedsSync: Bool = false
         public var proxySummary: String = ""
         public var dnsAbnormal: Bool = false
         public var wifiNoIP: Bool = false
@@ -427,6 +507,7 @@ public class NetworkTools: ObservableObject {
         let proxy = await assessSystemProxy(clashRunning: result.clashRunning)
         result.proxyConfigured = proxy.configured
         result.proxyExpected = proxy.isExpected
+        result.systemProxyNeedsSync = result.clashRunning && proxy.needsSync
         result.proxyActive = proxy.isResidual
         result.proxySummary = proxy.summary
 
@@ -449,7 +530,7 @@ public class NetworkTools: ObservableObject {
 
         // 仅把明确属于 Clash 的 Fake-IP TUN 路由算作残留；系统里其他 VPN 的 utun 数量不参与异常判断。
         let residualTun = result.clashTunActive && !result.clashRunning
-        let configIssues = residualTun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP
+        let configIssues = residualTun || result.proxyActive || result.dnsAbnormal || result.wifiNoIP || result.systemProxyNeedsSync
         let clashExternalFailure = result.clashRunning && (!result.generalExternalOK || !result.openAIOK)
         let clashExternalUnstable = result.clashRunning && result.generalExternalOK && result.openAIOK && !result.openAIStable
         let pureNetworkSideIssue = !result.clashRunning && !result.externalOK && !configIssues
@@ -473,6 +554,9 @@ public class NetworkTools: ObservableObject {
             } else {
                 result.description = "Clash 已停止，但系统仍保留 Fake-IP DNS"
             }
+        } else if result.systemProxyNeedsSync {
+            result.recommendedFix = "Clash 节点重测"
+            result.description = "当前网络位置关闭了 Clash 的系统代理开关，需先同步 127.0.0.1:7897"
         } else if clashExternalFailure || clashExternalUnstable {
             result.recommendedFix = "Clash 节点重测"
             let nodeText = result.activeClashNode.isEmpty
@@ -481,9 +565,13 @@ public class NetworkTools: ObservableObject {
             if clashExternalUnstable {
                 result.description = "\(nodeText) 出现间歇超时，建议重测并自动选择健康节点"
             } else if result.internalOK {
-                result.description = "国内网络正常，但 \(nodeText) 无法稳定访问海外/OpenAI"
+                result.description = result.clashRunning && !result.proxyConfigured
+                    ? "国内网络正常，但当前网络位置未启用 Clash 系统代理，\(nodeText) 无法访问海外/OpenAI"
+                    : "国内网络正常，但 \(nodeText) 无法稳定访问海外/OpenAI"
             } else {
-                result.description = "内外网均异常，需先重测 Clash 节点；若仍失败再检查 Wi-Fi/宽带"
+                result.description = result.clashRunning && !result.proxyConfigured
+                    ? "内外网均异常，当前网络位置未启用 Clash 系统代理，先同步当前网络位置后再复检"
+                    : "内外网均异常，需先重测 Clash 节点；若仍失败再检查 Wi-Fi/宽带"
             }
         } else if pureNetworkSideIssue {
             result.recommendedFix = "网络侧检查"
@@ -501,6 +589,8 @@ public class NetworkTools: ObservableObject {
             addLog("TUN 状态：\(result.clashTunActive ? "已启用" : "未启用")；系统 utun 共 \(result.utunCount) 个", level: .info)
             if result.proxyConfigured {
                 addLog("系统代理：\(result.proxySummary)", level: result.proxyActive ? .warning : .info)
+            } else if result.systemProxyNeedsSync {
+                addLog("系统代理：\(result.proxySummary)", level: .warning)
             }
             if result.wifiNoIP {
                 addLog("Wi-Fi IP 异常：\(result.wifiAddress.isEmpty ? "未获取" : result.wifiAddress)", level: .warning)
@@ -675,11 +765,12 @@ public class NetworkTools: ObservableObject {
     public func safeAutoRecoverClash(from diagnosis: DiagnosisResult) async -> SafeAutoRecoveryOutcome {
         let broadFailure = !diagnosis.generalExternalOK && !diagnosis.openAIOK
         let codexOnlyFailure = diagnosis.generalExternalOK && !diagnosis.openAIOK
+        let proxyNeedsSync = diagnosis.systemProxyNeedsSync
         guard diagnosis.recommendedFix == "Clash 节点重测",
               diagnosis.clashRunning,
               diagnosis.clashTunActive,
               !diagnosis.wifiNoIP,
-              broadFailure || codexOnlyFailure else {
+              broadFailure || codexOnlyFailure || proxyNeedsSync else {
             if diagnosis.recommendedFix == "Clash 节点重测" {
                 addLog("ℹ️ [自动修复] 仅检测到单次抖动或单一普通站点异常，本轮不修改网络", level: .info)
             }
@@ -699,13 +790,13 @@ public class NetworkTools: ObservableObject {
         // 等待一秒后二次探测，瞬时抖动已自行恢复时不做任何网络改动。
         try? await Task.sleep(nanoseconds: 1_000_000_000)
         let confirmation = await quickConnectivityCheck()
-        if confirmation.generalExternalOK && confirmation.openAIOK {
+        if confirmation.generalExternalOK && confirmation.openAIOK && !proxyNeedsSync {
             addLog("✅ [自动修复] 二次确认时链路已自行恢复，未修改任何网络配置", level: .success)
             return .recoveredWithoutChanges
         }
         let confirmedBroadFailure = !confirmation.generalExternalOK && !confirmation.openAIOK
         let confirmedCodexOnlyFailure = confirmation.generalExternalOK && !confirmation.openAIOK
-        guard confirmedBroadFailure || confirmedCodexOnlyFailure else {
+        guard confirmedBroadFailure || confirmedCodexOnlyFailure || proxyNeedsSync else {
             addLog("🔒 [自动修复] 二次结果不符合安全修复模型，本轮不修改网络", level: .warning)
             return .skipped
         }
@@ -730,6 +821,27 @@ public class NetworkTools: ObservableObject {
         var recovered = false
         var attempted = false
         var mayRetestDynamicGroup = confirmedCodexOnlyFailure
+
+        // 网络位置切换可能只关闭了当前档案的系统代理开关。先恢复明确的
+        // Clash 7897 绑定；这是无管理员权限的最小改动，成功后不再重建 TUN。
+        if proxyNeedsSync {
+            switch await syncClashSystemProxyIfNeeded() {
+            case .restored:
+                attempted = true
+                let afterProxy = await quickConnectivityCheck()
+                recovered = afterProxy.generalExternalOK && afterProxy.openAIOK
+                if recovered {
+                    await MainActor.run {
+                        self.isRepairing = false
+                        self.lastOperationSuccess = true
+                        self.addLog("✅ [自动修复] 当前网络位置的 Clash 代理已恢复，外网复检通过", level: .success)
+                    }
+                    return .attempted
+                }
+            case .notNeeded, .skipped:
+                break
+            }
+        }
 
         // 只有通用外网与 OpenAI 同时失败，才判断为 TUN/物理出口整体脱轨并重建 TUN。
         // 仅 OpenAI 失败时跳过 TUN，直接进入专用动态组健康重测。
@@ -800,6 +912,22 @@ public class NetworkTools: ObservableObject {
 
         var targetGroup = before.healthGroup.isEmpty ? before.group : before.healthGroup
         addLog("🧭 检查 \(before.group)：当前出口 \(before.node)（\(before.nodeType)）", level: .info)
+
+        // 先修复“新网络位置关闭系统代理”的低风险配置问题；只有复检仍失败，
+        // 才继续重载 TUN 或测速节点，避免把位置档案问题误判为节点故障。
+        let proxySync = await syncClashSystemProxyIfNeeded()
+        if case .restored = proxySync {
+            let linksAfterProxy = await quickConnectivityCheck()
+            if linksAfterProxy.generalExternalOK && linksAfterProxy.openAIOK {
+                await MainActor.run {
+                    self.isRepairing = false
+                    self.lastOperationSuccess = true
+                    self.addLog("✅ 当前网络位置同步后网络已恢复，无需重启 Clash 或切换节点", level: .success)
+                }
+                return
+            }
+            addLog("代理开关已恢复，但外网仍不通，继续检查 TUN 与节点", level: .warning)
+        }
 
         // 热点/Wi-Fi 切换后 Mihomo 偶尔仍保留旧物理出口，表现为核心、端口和 TUN 都在，
         // 但 DIRECT 与 PROXY 同时超时。手动一键修复先通过本地 API 轻量重建 TUN，
